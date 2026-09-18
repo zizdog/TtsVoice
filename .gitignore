@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+
+# Logs
+fatal_debug.log
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+
+# 内部文档 / 旧版本备份，不随插件发布
+HANDOFF-*.md
+NOTE-TO-MINI-*.md
+SPEC-TO-MINI-*.md
+DEPLOY-QWEN.md
+ttsServer.md
+voice-receiver/receiver.py.v1.bak

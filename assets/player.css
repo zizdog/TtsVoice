@@ -1,0 +1,221 @@
+/*
+ * TtsVoice - 前台播放器样式
+ *
+ * 所有类名以 ttsv- 前缀，颜色走 CSS 变量便于主题适配，
+ * 并支持 prefers-color-scheme 深色模式。
+ */
+
+.ttsv-player {
+    --ttsv-bg: #f6f7f9;
+    --ttsv-fg: #23262b;
+    --ttsv-muted: #8a9099;
+    --ttsv-accent: #467b96;
+    --ttsv-track: rgba(128, 128, 128, .22);
+    --ttsv-line: rgba(128, 128, 128, .15);
+
+    margin: 24px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--ttsv-line);
+    border-radius: 10px;
+    background: var(--ttsv-bg);
+    color: var(--ttsv-fg);
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+/* ---------- 播放条 ---------- */
+
+.ttsv-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.ttsv-btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 32px;
+    height: 32px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ttsv-fg);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    text-decoration: none;
+}
+
+.ttsv-btn:hover {
+    background: rgba(128, 128, 128, .16);
+}
+
+.ttsv-play {
+    min-width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--ttsv-accent);
+    color: #fff;
+    font-size: 15px;
+}
+
+.ttsv-play:hover {
+    background: var(--ttsv-accent);
+    opacity: .88;
+}
+
+/* 播放中显示暂停图标，反之显示三角 */
+.ttsv-player.is-playing .ttsv-icon-play {
+    display: none;
+}
+
+.ttsv-player:not(.is-playing) .ttsv-icon-pause {
+    display: none;
+}
+
+.ttsv-player:not(.is-muted) .ttsv-icon-muted {
+    display: none;
+}
+
+.ttsv-player.is-muted .ttsv-icon-vol {
+    display: none;
+}
+
+/* ---------- 进度条 ---------- */
+
+.ttsv-track {
+    position: relative;
+    flex: 1 1 auto;
+    height: 6px;
+    min-width: 80px;
+    border-radius: 3px;
+    background: var(--ttsv-track);
+    cursor: pointer;
+}
+
+.ttsv-loaded,
+.ttsv-played {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 0;
+    border-radius: 3px;
+    pointer-events: none;
+}
+
+.ttsv-loaded {
+    background: rgba(128, 128, 128, .25);
+}
+
+.ttsv-played {
+    background: var(--ttsv-accent);
+}
+
+.ttsv-thumb {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    width: 12px;
+    height: 12px;
+    margin: -6px 0 0 -6px;
+    border-radius: 50%;
+    background: var(--ttsv-accent);
+    pointer-events: none;
+    transition: transform .12s ease;
+}
+
+.ttsv-track:hover .ttsv-thumb {
+    transform: scale(1.25);
+}
+
+/* ---------- 时间 / 倍速 ---------- */
+
+.ttsv-time {
+    flex: 0 0 auto;
+    color: var(--ttsv-muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.ttsv-rate {
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 章节 ---------- */
+
+.ttsv-chapters {
+    margin: 12px 0 0;
+    padding: 10px 0 0;
+    border-top: 1px solid var(--ttsv-line);
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.ttsv-chapter {
+    margin: 0;
+}
+
+.ttsv-chapter-btn {
+    border: 1px solid var(--ttsv-line);
+    border-radius: 999px;
+    background: transparent;
+    padding: 3px 12px;
+    color: var(--ttsv-muted);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.ttsv-chapter-btn:hover {
+    border-color: var(--ttsv-accent);
+    color: var(--ttsv-accent);
+}
+
+.ttsv-chapter-btn.is-current {
+    border-color: var(--ttsv-accent);
+    background: var(--ttsv-accent);
+    color: #fff;
+}
+
+/* ---------- 移动端 ---------- */
+
+@media (max-width: 560px) {
+    .ttsv-bar {
+        flex-wrap: wrap;
+    }
+
+    .ttsv-track {
+        order: 3;
+        flex: 1 1 100%;
+    }
+
+    .ttsv-time {
+        order: 2;
+        margin-left: auto;
+    }
+
+    .ttsv-rate,
+    .ttsv-mute {
+        order: 1;
+    }
+}
+
+/* ---------- 深色模式 ---------- */
+
+@media (prefers-color-scheme: dark) {
+    .ttsv-player {
+        --ttsv-bg: #1b1e23;
+        --ttsv-fg: #d8dde3;
+        --ttsv-muted: #8b939d;
+        --ttsv-accent: #5aa1c4;
+        --ttsv-track: rgba(255, 255, 255, .16);
+        --ttsv-line: rgba(255, 255, 255, .12);
+    }
+}

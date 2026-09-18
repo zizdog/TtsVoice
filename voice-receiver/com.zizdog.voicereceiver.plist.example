@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    TtsVoice 音色样本接收端 —— launchd 开机自启示例
+
+    用法：
+      1. 改下面的路径、目录、密钥、端口
+      2. cp com.zizdog.voicereceiver.plist.example ~/Library/LaunchAgents/com.zizdog.voicereceiver.plist
+      3. launchctl load ~/Library/LaunchAgents/com.zizdog.voicereceiver.plist
+
+    查看日志：
+      tail -f ~/tts/voice-receiver/launchd.out.log
+      tail -f ~/tts/voice-receiver/launchd.err.log
+
+    停止：
+      launchctl unload ~/Library/LaunchAgents/com.zizdog.voicereceiver.plist
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.zizdog.voicereceiver</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/zizdog/tts/voice-receiver/receiver.py</string>
+		<string>--dir</string>
+		<string>/Users/zizdog/tts/voice-samples</string>
+		<string>--host</string>
+		<string>0.0.0.0</string>
+		<string>--port</string>
+		<string>8899</string>
+		<string>--token</string>
+		<string>改成一个随机密钥</string>
+		<!-- 上游 Qwen 服务。它应当只监听 127.0.0.1，对外由本代理提供鉴权 -->
+		<string>--upstream</string>
+		<string>http://127.0.0.1:8880</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/zizdog/tts/voice-receiver</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>/Users/zizdog/tts/voice-receiver/launchd.out.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>/Users/zizdog/tts/voice-receiver/launchd.err.log</string>
+
+	<!-- 只用标准库，不需要额外 PATH；保留一份以防将来加 ffmpeg 处理 -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+</dict>
+</plist>
