@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.8
+ * @version 1.6.9
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.6.8';
+        const VERSION = '1.6.9';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -330,6 +330,9 @@ namespace {
                 . '}'
                 // 把「音色样本 / 输出格式 / 语速」搬进默认收起的 <details>
                 . 'function buildAdv(){'
+                // 【必须幂等】这段脚本会执行两次（解析时 + DOMContentLoaded），
+                // 不做判断就会把已有 <details> 再套一层（实测出现「双层高级设置」）。
+                . 'if(document.querySelector(".ttsv-adv")){return;}'
                 . 'var vp=document.getElementById("ttsv-vp");'
                 . 'var first=row(ADV[0]);'
                 . 'var anchor=(vp&&vp.parentNode)?vp:first;'
@@ -468,49 +471,7 @@ namespace {
             );
             $form->addInput($provider);
 
-            // ---- ② 分块方式（所有服务商都生效，放前面；默认按字数）----
-            $clsRadio = self::elementClass('Radio');
-            $chunkMode = new $clsRadio(
-                'chunkMode',
-                array(
-                    'chars'     => _t('按字数'),
-                    'paragraph' => _t('按段落 / Markdown 标题'),
-                ),
-                'chars',
-                _t('分块方式'),
-                _t('正文怎么切块。<b>按字数</b>：在句末标点处按长度切，简单稳定。'
-                    . '<b>按段落</b>：以 Markdown 标题（<code>##</code>）为界分段，语流更自然、章节时间轴更准。')
-            );
-            $form->addInput($chunkMode);
-
-            // ---- ③ 分块长度 ----
-            $clsText = self::elementClass('Text');
-            $chunk = new $clsText(
-                'chunkChars',
-                NULL,
-                '200',
-                _t('分块长度（字符）'),
-                _t('单块上限字符数，超出会在句末标点处再切。留空或 0 用默认 <b>200</b>；Qwen 常用 <b>100~200</b>。')
-            );
-            $form->addInput($chunk);
-
-            // ---- ④ 播放器挂载方式（默认手动；手动放前面）----
-            $clsRadio = self::elementClass('Radio');
-            $auto = new $clsRadio(
-                'autoInsert',
-                array(
-                    '0' => _t('手动调用'),
-                    '1' => _t('自动插入'),
-                ),
-                '0',
-                _t('播放器挂载方式'),
-                _t('<b>手动</b>：在主题模板里写 <code>&lt;?php TtsVoice_Plugin::renderPlayer(); ?&gt;</code>'
-                    . '（用了 PJAX / 局部刷新的主题必须选它）。'
-                    . '<b>自动</b>：插件自己输出，需主题 <code>footer.php</code> 里有 <code>$this->footer()</code>。')
-            );
-            $form->addInput($auto);
-
-            // ---- ⑤ 自建 Qwen3-TTS ----
+            // ---- ② 自建 Qwen3-TTS：服务端地址与 Key（放最上面，填完就能用）----
             $clsText = self::elementClass('Text');
             $openaiBase = new $clsText(
                 'openaiBaseUrl',
@@ -533,7 +494,33 @@ namespace {
             );
             $form->addInput($openaiKey);
 
-            // ---- ⑥ 微软 Azure 语音 ----
+            // ---- ③ 分块方式（所有服务商都生效；默认按字数）----
+            $clsRadio = self::elementClass('Radio');
+            $chunkMode = new $clsRadio(
+                'chunkMode',
+                array(
+                    'chars'     => _t('按字数'),
+                    'paragraph' => _t('按段落 / Markdown 标题'),
+                ),
+                'chars',
+                _t('分块方式'),
+                _t('正文怎么切块。<b>按字数</b>：在句末标点处按长度切，简单稳定。'
+                    . '<b>按段落</b>：以 Markdown 标题（<code>##</code>）为界分段，语流更自然、章节时间轴更准。')
+            );
+            $form->addInput($chunkMode);
+
+            // ---- ④ 分块长度 ----
+            $clsText = self::elementClass('Text');
+            $chunk = new $clsText(
+                'chunkChars',
+                NULL,
+                '200',
+                _t('分块长度（字符）'),
+                _t('单块上限字符数，超出会在句末标点处再切。留空或 0 用默认 <b>200</b>；Qwen 常用 <b>100~200</b>。')
+            );
+            $form->addInput($chunk);
+
+            // ---- ⑤ 微软 Azure 语音 ----
             $clsText = self::elementClass('Text');
             $azureKey = new $clsText(
                 'azureKey',
@@ -626,6 +613,22 @@ namespace {
                     // 布局类不可用时忽略
                 }
             }
+
+            // ---- 播放器挂载方式（默认手动；手动排在前）----
+            $clsRadio = self::elementClass('Radio');
+            $auto = new $clsRadio(
+                'autoInsert',
+                array(
+                    '0' => _t('手动调用'),
+                    '1' => _t('自动插入'),
+                ),
+                '0',
+                _t('播放器挂载方式'),
+                _t('<b>手动</b>：在主题模板里写 <code>&lt;?php TtsVoice_Plugin::renderPlayer(); ?&gt;</code>'
+                    . '（用了 PJAX / 局部刷新的主题必须选它）。'
+                    . '<b>自动</b>：插件自己输出，需主题 <code>footer.php</code> 里有 <code>$this->footer()</code>。')
+            );
+            $form->addInput($auto);
 
             $clsText = self::elementClass('Text');
             $targetId = new $clsText(
