@@ -6,10 +6,11 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
 /**
  * TtsVoice - 多服务商 TTS 后端
  *
- * 1.6.0 起把「文本 → 音频」这一步抽象成 Provider 层：
- *   local   自建 tts-worker（异步任务模型，保持 1.5.0 行为完全不变）
+ * 1.6.0 起把「文本 → 音频」这一步抽象成 Provider 层（1.6.8 起 local/tts-worker 已移除）：
+ *   openai  自建 Qwen3-TTS（OpenAI 兼容协议；支持异步作业队列 / 音色克隆）
  *   azure   微软 Azure 语音（同步 REST，逐块合成后拼接 MP3）
- *   openai  OpenAI 兼容 /audio/speech（同步 REST，逐块合成后拼接 MP3）
+ *
+ * 音色样本为**可选**：没上传时提交不带 ref_audio，接收端用它的默认音色。
  *
  * 共同的对外契约（Action / Doctor / panel 只依赖这一层）：
  *   id()                               服务商标识
@@ -34,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.7
+ * @version 1.6.8
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -215,14 +216,15 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 return new $map[$id]();
             }
 
-            return new TtsVoice_Provider_Local();
+            // 1.6.8 起 tts-worker(local) 已彻底移除：未知/历史服务商一律回落到 Qwen3-TTS
+            // （老站点库里可能还存着 'local'，设置页保存后会被自愈成 'openai'）
+            return new TtsVoice_Provider_OpenAI();
         }
 
         /**
          * 配置下拉用：id => label
          *
-         * 顺序就是界面上的顺序：**自建 Qwen3-TTS 放第一个**（默认，主力方案），
-         * Azure 中间，自建 tts-worker 最后（老方案，仅保留兼容）。
+         * 顺序就是界面上的顺序：**自建 Qwen3-TTS 放第一个**（默认，主力方案），Azure 第二。
          *
          * @return array
          */
@@ -231,7 +233,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
             return array(
                 'openai' => _t('自建 Qwen3-TTS（推荐）'),
                 'azure'  => _t('微软 Azure 语音'),
-                'local'  => _t('自建 tts-worker'),
             );
         }
 
@@ -1138,503 +1139,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
     }
 
     /**
-     * 自建 tts-worker（异步任务模型）
-     *
-     * 1.5.0 的 NAS 客户端原样搬到这里：同一批端点、同样的请求头/超时、
-     * 同样的流式下载与 1024 字节校验、同样的错误文案。
-     */
-    class TtsVoice_Provider_Local extends TtsVoice_Provider
-    {
-        /**
-         * @return string
-         */
-        public function id()
-        {
-            return 'local';
-        }
-
-        /**
-         * @return string
-         */
-        public function label()
-        {
-            return _t('自建 tts-worker');
-        }
-
-        /**
-         * @return bool
-         */
-        public function isAsync()
-        {
-            return true;
-        }
-
-        /**
-         * @return string
-         */
-        public function endpoint()
-        {
-            return $this->nasBase();
-        }
-
-        /**
-         * @return array
-         */
-        public function health()
-        {
-            $start    = microtime(true);
-            $response = $this->nasRequest('GET', '/health');
-            $elapsed  = round((microtime(true) - $start) * 1000);
-
-            if (!$response['ok']) {
-                return array('ok' => false, 'error' => $response['error'], 'ms' => $elapsed, 'data' => NULL);
-            }
-
-            return array('ok' => true, 'error' => '', 'ms' => $elapsed, 'data' => $response['data']);
-        }
-
-        /**
-         * @return array
-         */
-        public function voices()
-        {
-            $response = $this->nasRequest('GET', '/v1/voices');
-
-            if (!$response['ok']) {
-                return array('ok' => false, 'error' => $response['error'], 'voices' => array(), 'note' => '');
-            }
-
-            return array('ok' => true, 'error' => '', 'voices' => $response['data'], 'note' => '');
-        }
-
-        /**
-         * 提交任务到 tts-worker
-         *
-         * @param int    $cid
-         * @param string $title
-         * @param string $text
-         * @param string $sourceText 异步模型用不到
-         * @return array
-         */
-        public function submit($cid, $title, $text, $sourceText = '')
-        {
-            $response = $this->nasRequest('POST', '/v1/jobs', array(
-                'cid'     => intval($cid),
-                'title'   => $title,
-                'content' => $text,
-                'voice'   => TtsVoice_Plugin::opt('voice', 'zf_027'),
-                'speed'   => TtsVoice_Plugin::speedOpt(),
-            ));
-
-            if (!$response['ok']) {
-                return array(
-                    'ok'       => false,
-                    'error'    => $response['error'],
-                    'jobId'    => '',
-                    'status'   => '',
-                    'audio'    => '',
-                    'duration' => 0,
-                    'size'     => 0,
-                    'chapters' => array(),
-                    'progress' => '',
-                );
-            }
-
-            $body  = $response['data'];
-            $jobId = isset($body['id']) ? (string) $body['id'] : '';
-
-            if ('' === $jobId) {
-                return array(
-                    'ok'       => false,
-                    'error'    => 'NAS 未返回任务 ID',
-                    'jobId'    => '',
-                    'status'   => '',
-                    'audio'    => '',
-                    'duration' => 0,
-                    'size'     => 0,
-                    'chapters' => array(),
-                    'progress' => '',
-                );
-            }
-
-            return array(
-                'ok'       => true,
-                'error'    => '',
-                'jobId'    => $jobId,
-                'status'   => isset($body['status']) ? (string) $body['status'] : 'queued',
-                'audio'    => '',
-                'duration' => 0,
-                'size'     => 0,
-                'chapters' => array(),
-                'progress' => '0/0',
-            );
-        }
-
-        /**
-         * 从 tts-worker 同步状态；done 时下载音频
-         *
-         * @param array $job
-         * @return array|null
-         */
-        public function poll($job)
-        {
-            $job = is_array($job) ? $job : array();
-
-            if (empty($job) || '' === (string) (isset($job['job_id']) ? $job['job_id'] : '')) {
-                return null;
-            }
-
-            // 已终态的不再查 NAS（避免无谓请求）
-            if (in_array(isset($job['status']) ? $job['status'] : '', array('ready', 'failed'), true)) {
-                return null;
-            }
-
-            $response = $this->nasRequest('GET', '/v1/jobs/' . rawurlencode($job['job_id']));
-
-            if (!$response['ok']) {
-                // 查不到就保持原状，不覆盖本地状态
-                return null;
-            }
-
-            $remote = $response['data'];
-
-            if (!is_array($remote)) {
-                return null;
-            }
-
-            $status = isset($remote['status']) ? (string) $remote['status'] : '';
-
-            $patch = array(
-                'status'   => $status,
-                'progress' => (isset($remote['done']) || isset($remote['total']))
-                    ? intval(isset($remote['done']) ? $remote['done'] : 0) . '/' . intval(isset($remote['total']) ? $remote['total'] : 0)
-                    : '',
-                'duration' => isset($remote['duration']) ? (string) $remote['duration'] : '',
-                'size'     => isset($remote['size']) ? intval($remote['size']) : 0,
-                'chapters' => isset($remote['chapters']) ? $remote['chapters'] : array(),
-                'error'    => isset($remote['error']) ? (string) $remote['error'] : '',
-            );
-
-            if ('failed' === $status) {
-                return $patch;
-            }
-
-            if ('done' === $status) {
-                $cid   = intval($job['cid']);
-                $saved = $this->fetchAudio($job, $this->audioTarget($cid));
-
-                if ($saved) {
-                    // 下载回来的字节才是真相：接收端可能没按我们要求的格式给
-                    $head = (string) @file_get_contents($this->audioTarget($cid), false, NULL, 0, 16);
-                    $real = ('' === $head) ? $this->audioExtension() : $this->sniffExtension($head);
-                    $target = $this->audioTarget($cid);
-
-                    if ($real !== $this->audioExtension()) {
-                        $moved = $this->audioTarget($cid, $real);
-
-                        if (@rename($target, $moved)) {
-                            $target = $moved;
-                        }
-                    }
-
-                    if ($real !== $this->audioExtension()) {
-                        $this->dropStaleAudio($cid, $real);
-                        $patch['error'] = $this->formatNotice($real);
-                    }
-
-                    $patch['status'] = 'ready';
-                    $patch['audio']  = $this->audioRelative($cid, $real);
-                } else {
-                    $patch['status'] = 'failed';
-                    $patch['error']  = '' === $patch['error'] ? '音频下载失败' : $patch['error'];
-                }
-            }
-
-            return $patch;
-        }
-
-        /**
-         * 流式下载音频到本地（保持 1.5.0 行为）
-         *
-         * @param array  $job
-         * @param string $targetPath
-         * @return bool
-         */
-        public function fetchAudio($job, $targetPath)
-        {
-            $dir = TtsVoice_Plugin::audioPath();
-
-            if (!is_dir($dir)) {
-                // 递归创建，失败就直接返回
-                if (!@mkdir($dir, 0755, true) && !is_dir($dir)) {
-                    return false;
-                }
-            }
-
-            if (!is_writable($dir)) {
-                return false;
-            }
-
-            $target = (string) $targetPath;
-            $tmp    = $target . '.tmp';
-
-            $jobId = isset($job['job_id']) ? (string) $job['job_id'] : '';
-
-            $url     = $this->nasBase() . '/v1/jobs/' . rawurlencode($jobId) . '/audio';
-            $timeout = $this->timeout();
-
-            $ok = false;
-
-            // 自签证书场景可关闭校验（默认开启）
-            $verify = $this->verifySsl();
-
-            if (function_exists('curl_init')) {
-                $fp = @fopen($tmp, 'wb');
-
-                if ($fp) {
-                    $ch = curl_init($url);
-
-                    $dlOptions = array(
-                        CURLOPT_FILE           => $fp,
-                        CURLOPT_TIMEOUT        => $timeout * 4, // 下载比普通请求更耗时
-                        CURLOPT_CONNECTTIMEOUT => $timeout,
-                        // 不跟随重定向：自定义头 X-Api-Key 在跨主机重定向时会被 curl 继续发送，
-                        // 一旦 NAS 地址被 302 到别处就会泄露 Key
-                        CURLOPT_FOLLOWLOCATION => false,
-                        CURLOPT_HTTPHEADER     => array('X-Api-Key: ' . $this->apiKey()),
-                        CURLOPT_USERAGENT      => 'TtsVoice/1.0',
-                    );
-
-                    if (!$verify) {
-                        $dlOptions[CURLOPT_SSL_VERIFYPEER] = false;
-                        $dlOptions[CURLOPT_SSL_VERIFYHOST] = false;
-                    }
-
-                    curl_setopt_array($ch, $dlOptions);
-
-                    $result = curl_exec($ch);
-                    $code   = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                    curl_close($ch);
-                    fclose($fp);
-
-                    $ok = (false !== $result) && 200 === $code;
-                }
-            } elseif (ini_get('allow_url_fopen')) {
-                $context = stream_context_create(array(
-                    'http' => array(
-                        'method' => 'GET',
-                        'header' => "X-Api-Key: " . $this->apiKey() . "\r\n",
-                        'timeout' => $timeout * 4,
-                    ),
-                    'ssl' => array(
-                        'verify_peer'       => $verify,
-                        'verify_peer_name'  => $verify,
-                        'allow_self_signed' => !$verify,
-                    ),
-                ));
-
-                $data = @file_get_contents($url, false, $context);
-
-                if (false !== $data && '' !== $data) {
-                    $ok = false !== @file_put_contents($tmp, $data);
-                }
-            }
-
-            if (!$ok) {
-                @unlink($tmp);
-
-                return false;
-            }
-
-            // 简单校验：至少是个有内容的文件
-            if (!file_exists($tmp) || filesize($tmp) < 1024) {
-                @unlink($tmp);
-
-                return false;
-            }
-
-            if (!@rename($tmp, $target)) {
-                @unlink($tmp);
-
-                return false;
-            }
-
-            return true;
-        }
-
-        /**
-         * 删除 NAS 任务
-         *
-         * @param array $job
-         * @return bool
-         */
-        public function delete($job)
-        {
-            $jobId = isset($job['job_id']) ? (string) $job['job_id'] : '';
-
-            if ('' !== $jobId) {
-                $this->nasRequest('DELETE', '/v1/jobs/' . rawurlencode($jobId));
-            }
-
-            return true;
-        }
-
-        /**
-         * 请求 tts-worker
-         *
-         * @param string     $method GET|POST|DELETE
-         * @param string     $path   以 / 开头
-         * @param array|null $body   POST 的 JSON 体
-         * @return array {ok:bool, data:mixed, error:string}
-         */
-        protected function nasRequest($method, $path, $body = NULL)
-        {
-            $url     = $this->nasBase() . $path;
-            $timeout = $this->timeout();
-            $method  = strtoupper($method);
-
-            $headers = array(
-                'X-Api-Key: ' . $this->apiKey(),
-                'Accept: application/json',
-            );
-
-            $payload = '';
-
-            if (NULL !== $body) {
-                $payload = json_encode($body, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                $headers[] = 'Content-Type: application/json';
-                $headers[] = 'Content-Length: ' . strlen($payload);
-            }
-
-            $raw  = NULL;
-            $code = 0;
-            $err  = '';
-
-            // 自签证书场景可关闭校验（默认开启）
-            $verify = $this->verifySsl();
-
-            if (function_exists('curl_init')) {
-                $ch = curl_init($url);
-
-                $options = array(
-                    CURLOPT_RETURNTRANSFER => true,
-                    CURLOPT_TIMEOUT        => $timeout,
-                    CURLOPT_CONNECTTIMEOUT => $timeout,
-                    // 不跟随重定向（原因同上：避免 X-Api-Key 随重定向外泄）
-                    CURLOPT_FOLLOWLOCATION => false,
-                    CURLOPT_HTTPHEADER     => $headers,
-                    CURLOPT_USERAGENT      => 'TtsVoice/1.0',
-                    CURLOPT_CUSTOMREQUEST  => $method,
-                );
-
-                if (!$verify) {
-                    $options[CURLOPT_SSL_VERIFYPEER] = false;
-                    $options[CURLOPT_SSL_VERIFYHOST] = false;
-                }
-
-                if (NULL !== $body) {
-                    $options[CURLOPT_POSTFIELDS] = $payload;
-                }
-
-                curl_setopt_array($ch, $options);
-
-                $raw  = curl_exec($ch);
-                $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-                if (false === $raw) {
-                    $err = curl_error($ch);
-                }
-
-                curl_close($ch);
-            } elseif (ini_get('allow_url_fopen')) {
-                $context = stream_context_create(array(
-                    'http' => array(
-                        'method'        => $method,
-                        'header'        => implode("\r\n", $headers),
-                        'content'       => NULL === $body ? '' : $payload,
-                        'timeout'       => $timeout,
-                        'ignore_errors' => true,
-                    ),
-                    'ssl' => array(
-                        'verify_peer'      => $verify,
-                        'verify_peer_name' => $verify,
-                        'allow_self_signed' => !$verify,
-                    ),
-                ));
-
-                $raw = @file_get_contents($url, false, $context);
-
-                if (false === $raw) {
-                    $err = '请求失败';
-                } elseif (isset($http_response_header) && is_array($http_response_header) && !empty($http_response_header[0])) {
-                    if (preg_match('/\s(\d{3})\s/', $http_response_header[0], $m)) {
-                        $code = (int) $m[1];
-                    }
-                }
-            } else {
-                return array('ok' => false, 'data' => NULL, 'error' => '服务器未启用 curl 且 allow_url_fopen 已关闭');
-            }
-
-            if ('' !== $err) {
-                return array('ok' => false, 'data' => NULL, 'error' => self::explainError($err));
-            }
-
-            if ($code >= 400) {
-                $message = '';
-
-                $decoded = json_decode((string) $raw, true);
-
-                if (is_array($decoded) && isset($decoded['detail'])) {
-                    $message = is_array($decoded['detail']) ? json_encode($decoded['detail']) : (string) $decoded['detail'];
-                } elseif (is_array($decoded) && isset($decoded['error'])) {
-                    $message = (string) $decoded['error'];
-                }
-
-                $map = array(
-                    401 => 'API Key 不正确',
-                    403 => '没有权限',
-                    404 => '任务不存在（可能已被 NAS 清理）',
-                    409 => '音频尚未就绪',
-                );
-
-                if ('' === $message && isset($map[$code])) {
-                    $message = $map[$code];
-                }
-
-                return array('ok' => false, 'data' => NULL, 'error' => 'HTTP ' . $code . ('' === $message ? '' : ' ' . $message));
-            }
-
-            if (NULL === $raw || '' === trim((string) $raw)) {
-                return array('ok' => true, 'data' => array(), 'error' => '');
-            }
-
-            $decoded = json_decode((string) $raw, true);
-
-            return array('ok' => true, 'data' => NULL === $decoded ? array() : $decoded, 'error' => '');
-        }
-
-        /**
-         * NAS 基址
-         *
-         * @return string
-         */
-        protected function nasBase()
-        {
-            return rtrim((string) TtsVoice_Plugin::opt('nasUrl', ''), '/');
-        }
-
-        /**
-         * API Key
-         *
-         * @return string
-         */
-        protected function apiKey()
-        {
-            return (string) TtsVoice_Plugin::opt('apiKey', '');
-        }
-    }
-
-    /**
      * 微软 Azure 语音（同步 REST）
      */
     class TtsVoice_Provider_Azure extends TtsVoice_Provider
@@ -2481,25 +1985,21 @@ if (!class_exists('TtsVoice_Provider', false)) {
          */
         protected function submitRemoteJob($cid, $title, array $chunks)
         {
-            // 只有克隆一条路：ref_audio 必须是**TTS 主机上**的路径，由接收端校验存在性。
-            // 没有样本就别提交了 —— 直接给一句能照着做的话，比让远端报模型错误强。
-            if (!TtsVoice_Plugin::hasCloneVoice()) {
-                return $this->fail(TtsVoice_Plugin::needSampleMessage());
-            }
-
+            /*
+             * 【1.6.8 起音色样本可选】TTS 主机上有一份默认音色（接收端的 default 来源），
+             * 所以「网站没上传样本」不再拦：不带 ref_audio / source 提交，
+             * 接收端会自动回落到它自己的 <dir>/default/ref.wav。
+             *
+             * 上传过样本时保持原行为：ref_audio 必须是 **TTS 主机上** 的路径
+             * （接收端会校验存在性），并带上 source 以便多站点对账。
+             */
             $refAudio = trim((string) TtsVoice_Plugin::refAudioForHost());
 
-            if ('' === $refAudio) {
-                return $this->fail('拿不到音色样本的路径，请到设置页重新上传一次音色样本。');
-            }
-
-            /*
-             * 配了接收端（跨机）但 refAudioPath 是空的 → 样本只存在**网站这台机器**上，
-             * 接收端读不到。以前会带着网站的路径发过去，等接收端报 "ref_audio not found"，
-             * 用户在面板上看不出该做什么。这里提前拦住，并说清怎么修。
-             */
-            if ('' === trim((string) TtsVoice_Plugin::opt('refAudioPath', ''))
+            if ('' !== $refAudio
+                && '' === trim((string) TtsVoice_Plugin::opt('refAudioPath', ''))
                 && '' !== trim((string) TtsVoice_Plugin::refUploadUrl())) {
+                // 样本只在**网站这台机器**上、还没推到 TTS 主机 —— 提前说清怎么修，
+                // 否则远端只会回一句 "ref_audio not found"。
                 return $this->fail(
                     '音色样本还没推送到 TTS 主机（当前只有网站本机的路径）。'
                     . '请到「设置 → TtsVoice → 音色样本」点「重新同步到 TTS 主机」，或重新上传一次样本。'
@@ -2527,19 +2027,22 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 // 接收端支持就照做，不支持就忽略（v1.3.0 会忽略未知字段）。
                 // 详见 SPEC §14：少了 repetition_penalty=1.05，长句会整段退化。
                 'sampling'        => $this->sampling(),
-                // 本次用的是「哪个来源」的音色样本（receiver v1.5.0+ 会记进任务、
-                // 也写进日志，多站点共用一台 TTS 主机时便于对账）。
-                'source'          => TtsVoice_Plugin::refSourceId(),
                 'chunks'          => $payloadChunks,
             );
 
-            $payload['ref_audio'] = $refAudio;
+            if ('' !== $refAudio) {
+                // 本次用的是「哪个来源」的音色样本（receiver v1.5.0+ 会记进任务与日志，
+                // 多站点共用一台 TTS 主机时便于对账）。
+                $payload['source']    = TtsVoice_Plugin::refSourceId();
+                $payload['ref_audio'] = $refAudio;
 
-            $refText = TtsVoice_Plugin::refText();
+                $refText = TtsVoice_Plugin::refText();
 
-            if ('' !== $refText) {
-                $payload['ref_text'] = $refText;
+                if ('' !== $refText) {
+                    $payload['ref_text'] = $refText;
+                }
             }
+            // 没样本：不带 source/ref_audio → 接收端用 default 音色
 
             $response = $this->receiverRequest(
                 'POST',
@@ -2624,11 +2127,9 @@ if (!class_exists('TtsVoice_Provider', false)) {
          */
         protected function submitLocalJob($cid, $title, array $chunks)
         {
-            // 【只有克隆一条路】没有样本就直接拒绝，并给出能照着做的一句话。
-            if (!TtsVoice_Plugin::hasCloneVoice()) {
-                return $this->fail(TtsVoice_Plugin::needSampleMessage());
-            }
-
+            // 【1.6.8 起样本可选】没上传样本就不带 ref_audio，由接收端用它自己的
+            // 默认音色（<dir>/default/ref.wav）；上传过才校验路径。
+            //
             // 参考音频必须在「TTS 主机」上真的存在。
             //
             // 【跨机时不要在本机 is_file】refAudioPath 是 **TTS 主机上**的路径，
@@ -2638,13 +2139,9 @@ if (!class_exists('TtsVoice_Provider', false)) {
             // 只有「同机 / 共享存储」（没配接收端）才在本机提前挡一下。
             $refFile = TtsVoice_Plugin::refAudioForHost();
 
-            if ('' === $refFile) {
-                return $this->fail(
-                    '拿不到音色样本的路径，请到「设置 → TtsVoice → 音色样本」重新上传一次。'
-                );
-            }
-
-            if ('' === trim((string) TtsVoice_Plugin::refUploadUrl()) && !is_file($refFile)) {
+            if ('' !== $refFile
+                && '' === trim((string) TtsVoice_Plugin::refUploadUrl())
+                && !is_file($refFile)) {
                 return $this->fail(
                     '音色样本文件不存在：' . $refFile . '。请到「设置 → TtsVoice → 音色样本」重新上传。'
                 );
@@ -3593,10 +3090,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
  */
 if (!class_exists('TypechoPlugin\\TtsVoice\\Provider\\Base', false) && class_exists('TtsVoice_Provider', false)) {
     @class_alias('TtsVoice_Provider', 'TypechoPlugin\\TtsVoice\\Provider\\Base');
-}
-
-if (!class_exists('TypechoPlugin\\TtsVoice\\Provider\\Local', false) && class_exists('TtsVoice_Provider_Local', false)) {
-    @class_alias('TtsVoice_Provider_Local', 'TypechoPlugin\\TtsVoice\\Provider\\Local');
 }
 
 if (!class_exists('TypechoPlugin\\TtsVoice\\Provider\\Azure', false) && class_exists('TtsVoice_Provider_Azure', false)) {

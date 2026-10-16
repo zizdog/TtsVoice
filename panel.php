@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.7
+ * @version 1.6.8
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
@@ -198,12 +198,12 @@ if ('doctor' === $panelAction) {
                 <?php
                 // 1.6.0：显示当前 TTS 服务与目标地址
                 $ttsvProvider = class_exists('TtsVoice_Provider', false)
-                    ? TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'local'))
+                    ? TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'))
                     : NULL;
-                $ttsvEndpoint = $ttsvProvider ? $ttsvProvider->endpoint() : (string) TtsVoice_Plugin::opt('nasUrl', '');
+                $ttsvEndpoint = $ttsvProvider ? $ttsvProvider->endpoint() : '';
                 ?>
                 <?php _e('服务：'); ?>
-                <code><?php echo ttsv_esc($ttsvProvider ? $ttsvProvider->label() : 'local'); ?></code>
+                <code><?php echo ttsv_esc($ttsvProvider ? $ttsvProvider->label() : 'openai'); ?></code>
                 <?php _e('地址：'); ?>
                 <code><?php echo ttsv_esc($ttsvEndpoint); ?></code>
             </span>

@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.7
+ * @version 1.6.8
  */
 class TtsVoice_Doctor
 {
@@ -44,7 +44,7 @@ class TtsVoice_Doctor
         self::checkTable($rows);
         self::checkAudioDir($rows);
         self::checkActionUrl($rows);
-        self::checkNas($rows);
+        self::checkService($rows);
         self::checkConfig($rows);
         self::checkMount($rows);
         self::checkFfmpeg($rows);
@@ -136,7 +136,7 @@ class TtsVoice_Doctor
             return;
         }
 
-        $provider = TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'local'));
+        $provider = TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'));
         $endpoint = $provider->endpoint();
 
         self::row(
@@ -230,106 +230,41 @@ class TtsVoice_Doctor
     /**
      * 服务连通性
      *
-     * provider=local 时保持 1.5.0 的 NAS /health 探测；
-     * azure / openai 改为调用各自 provider 的 health()
-     * （Azure 做一次极短合成，OpenAI 走 GET {base}/models），都是带鉴权的真实检查。
+     * 统一走 provider->health()（Azure 做一次极短合成，Qwen 走 GET {base}/models），
+     * 都是带鉴权的真实检查。1.6.8 起 tts-worker(local) 已移除，
+     * 不再有「NAS /health 探测」这条老路径。
      */
-    protected static function checkNas(&$rows)
+    protected static function checkService(&$rows)
     {
-        $provider = class_exists('TtsVoice_Provider', false)
-            ? TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'local'))
-            : NULL;
-
-        // 同步型服务：直接问 provider
-        if ($provider && 'local' !== $provider->id()) {
-            $result = $provider->health();
-            $ms     = intval($result['ms']);
-            $name   = '服务连通性（' . $provider->label() . '）';
-
-            if (!empty($result['ok'])) {
-                $detail = '鉴权检查通过（HTTP 200）';
-
-                if (!empty($result['data'])) {
-                    $detail .= ' ｜ ' . json_encode($result['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-                }
-
-                self::row($rows, $name, true, $detail . '（' . $ms . ' ms）', '');
-
-                return;
-            }
-
-            self::row(
-                $rows,
-                $name,
-                false,
-                $result['error'] . '（' . $ms . ' ms）',
-                '检查 API Key / 区域 / Endpoint / 网络；也可到插件设置换回「自建 tts-worker」'
-            );
+        if (!class_exists('TtsVoice_Provider', false)) {
+            self::row($rows, '服务连通性', false, 'Provider 层未加载', '插件文件不完整，请重新上传 usr/plugins/TtsVoice/');
 
             return;
         }
 
-        $nasUrl = TtsVoice_Plugin::opt('nasUrl', '');
+        $provider = TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'));
+        $result   = $provider->health();
+        $ms       = intval($result['ms']);
+        $name     = '服务连通性（' . $provider->label() . '）';
 
-        if ('' === $nasUrl) {
-            self::row($rows, 'NAS 连通性', false, '未配置服务地址', '到插件设置里填写 NAS 服务地址，如 http://192.168.1.10:8800');
+        if (!empty($result['ok'])) {
+            $detail = '鉴权检查通过（HTTP 200）';
+
+            if (!empty($result['data'])) {
+                $detail .= ' ｜ ' . json_encode($result['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            }
+
+            self::row($rows, $name, true, $detail . '（' . $ms . ' ms）', '');
 
             return;
         }
-
-        $target = rtrim($nasUrl, '/') . '/health';
-        $start  = microtime(true);
-        $ok     = false;
-        $detail = '';
-
-        $verify = TtsVoice_Plugin::boolOpt('verifySsl', true);
-
-        if (function_exists('curl_init')) {
-            $ch = curl_init($target);
-
-            $opts = array(
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT        => 8,
-                CURLOPT_CONNECTTIMEOUT => 5,
-            );
-
-            if (!$verify) {
-                $opts[CURLOPT_SSL_VERIFYPEER] = false;
-                $opts[CURLOPT_SSL_VERIFYHOST] = false;
-            }
-
-            curl_setopt_array($ch, $opts);
-
-            $body = curl_exec($ch);
-            $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $err  = curl_error($ch);
-            curl_close($ch);
-
-            $ok     = (200 === $code);
-            $detail = 'HTTP ' . $code . ' ' . (false === $body ? $err : substr((string) $body, 0, 100));
-            $detail .= ' ｜实际连接: ' . $target;
-
-            // SSL 失败时给明确指引
-            if (false === $body && false !== stripos($err, 'SSL')) {
-                $detail .= ' —— 证书问题，可到插件设置把「HTTPS 证书校验」改为「跳过验证」';
-            }
-        } elseif (ini_get('allow_url_fopen')) {
-            $ctx  = stream_context_create(array('http' => array('timeout' => 8, 'ignore_errors' => true)));
-            $body = @file_get_contents($target, false, $ctx);
-            $ok     = (false !== $body && '' !== $body);
-            $detail = $ok ? substr((string) $body, 0, 100) : '连接失败';
-        } else {
-            $detail = '无法测试：curl 与 allow_url_fopen 均不可用';
-        }
-
-        $detail .= '（' . round((microtime(true) - $start) * 1000) . ' ms）';
 
         self::row(
             $rows,
-            'NAS 连通性',
-            $ok,
-            $detail,
-            $ok ? '' : '检查：服务是否启动 / 地址端口是否正确 / 是否在同一内网（异地需 Tailscale 组内网）'
+            $name,
+            false,
+            $result['error'] . '（' . $ms . ' ms）',
+            '检查 API Key / 区域 / Endpoint / 服务地址与网络（异地需先组内网）'
         );
     }
 
@@ -342,10 +277,10 @@ class TtsVoice_Doctor
     {
         // 1.6.0：不同 provider 的目标地址不同，统一从 provider->endpoint() 取
         $provider = class_exists('TtsVoice_Provider', false)
-            ? TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'local'))
+            ? TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'))
             : NULL;
 
-        $url     = $provider ? (string) $provider->endpoint() : (string) TtsVoice_Plugin::opt('nasUrl', '');
+        $url     = $provider ? (string) $provider->endpoint() : '';
         $isHttps = 0 === stripos($url, 'https://');
         $isLocal = (bool) preg_match('#(127\.0\.0\.1|localhost|192\.168\.|10\.\d+\.|172\.(1[6-9]|2\d|3[01])\.)#i', $url);
         $timeout = TtsVoice_Plugin::intOpt('timeout', 15);

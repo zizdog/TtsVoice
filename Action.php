@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.7
+ * @version 1.6.8
  */
 class TtsVoice_Action extends Typecho_Widget
 {
@@ -196,26 +196,12 @@ class TtsVoice_Action extends Typecho_Widget
             $status = '' === (string) $result['status'] ? 'queued' : (string) $result['status'];
 
             /*
-             * 【只有 local（NAS tts-worker）才需要这里落库】
-             *
-             * Local::submit() 只回报 jobId，不写库；而 OpenAI/Qwen 的 submit()
-             * **已经自己写好了**（job_id、voice 标签 ref:…/预置名、progress 0/N）。
-             *
-             * 以前这里不分服务商统一再写一次，把 voice 覆盖成了「voice」选项里的
-             * 本地音色名（zf_xiaoxiao），progress 也被冲成 0/0 ——
-             * 这正是历史上 cid=612/682 那种「voice=zf_xiaoxiao、progress=0/0」脏行的来源。
+             * 【不要在这里再落一次库】异步任务（Qwen3-TTS）的 submit() 已经自己写好了
+             * job 行（job_id、voice 标签、progress 0/N）。以前不分服务商统一再写一次，
+             * 把 voice 覆盖成本地音色名、progress 冲成 0/0 ——
+             * 历史上 cid=612/682 那种脏行就是这么来的。
+             * （1.6.8 起 tts-worker(local) 已移除，这里不再需要任何服务商特判。）
              */
-            if ('local' === $provider->id()) {
-                TtsVoice_Plugin::saveJob($cid, array(
-                    'job_id'   => $jobId,
-                    'status'   => $status,
-                    'title'    => $title,
-                    'voice'    => TtsVoice_Plugin::opt('voice', 'zf_027'),
-                    'speed'    => (string) TtsVoice_Plugin::speedOpt(),
-                    'progress' => '0/0',
-                    'error'    => '',
-                ));
-            }
 
             return $this->json(array(
                 'cid'    => $cid,
@@ -463,7 +449,7 @@ class TtsVoice_Action extends Typecho_Widget
      */
     protected function provider()
     {
-        return TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'local'));
+        return TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'));
     }
 
     /**
