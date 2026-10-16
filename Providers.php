@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.9
+ * @version 1.6.10
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -2418,7 +2418,7 @@ if (!class_exists('TtsVoice_Provider', false)) {
         /**
          * 反向代理把「上游地址」写错时，报错很隐晦 → 补一句能照着做的提示
          *
-         * 典型：Lucky / Nginx 回 `{"msg":"target url [...]: invalid port \": 8899\" after host"}`。
+         * 典型：Lucky / Nginx 回 `{"msg":"target url [...]: invalid port \": 8894\" after host"}`。
          * 真实原因往往是**全角冒号「：」**（不是空格），但报错里完全看不出来。
          *
          * @param string $text
@@ -2483,7 +2483,7 @@ if (!class_exists('TtsVoice_Provider', false)) {
                     . '）'
                     . ($looksHtml ? '，而是一整页网页' : '')
                     . ' —— 「Qwen 服务端地址」很可能填错了（指到了别的服务/后台界面），'
-                    . '正确值应指向接收端，例如 http://<主机>:8899/v1'
+                    . '正确值应指向接收端，例如 http://<主机>:8894/v1'
                     . ('' !== $snippet ? '。响应开头：' . $snippet : '')
                 );
             }

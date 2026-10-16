@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.9
+ * @version 1.6.10
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.6.9';
+        const VERSION = '1.6.10';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -476,10 +476,10 @@ namespace {
             $openaiBase = new $clsText(
                 'openaiBaseUrl',
                 NULL,
-                'http://127.0.0.1:8899/v1',
+                'http://127.0.0.1:8894/v1',
                 _t('Qwen 服务端地址'),
-                _t('形如 <code>http://主机:8899/v1</code>，<b>结尾必须带 <code>/v1</code></b>。'
-                    . '走接收端（8899）才支持鉴权、排队与音色样本上传。')
+                _t('形如 <code>http://主机:8894/v1</code>，<b>结尾必须带 <code>/v1</code></b>。'
+                    . '走接收端（8894）才支持鉴权、排队与音色样本上传。')
             );
             $form->addInput($openaiBase);
 
@@ -1041,7 +1041,7 @@ namespace {
                 'azureFormat'   => 'audio-24khz-48kbitrate-mono-mp3',
 
                 // 自建 Qwen3-TTS（OpenAI 兼容协议）
-                'openaiBaseUrl' => 'http://127.0.0.1:8899/v1',
+                'openaiBaseUrl' => 'http://127.0.0.1:8894/v1',
                 'openaiKey'     => '',
                 // 【已从设置页去掉】改名后不再由用户选：服务类型固定 qwen3tts；
                 // openaiModel / openaiCloneModel 作为隐藏键保留默认值（由「音色」决定用哪个）。
@@ -1709,7 +1709,7 @@ namespace {
          * （receiver.py 同时提供 /voice 和 /v1/*）。所以再让用户填一遍 host:port
          * 纯属重复劳动，还容易填不一致。
          *
-         * openaiBaseUrl 形如 http://host:8899/v1 → 去掉结尾的 /v1 就是接收端地址。
+         * openaiBaseUrl 形如 http://host:8894/v1 → 去掉结尾的 /v1 就是接收端地址。
          * 真要分开（接收端与 TTS 不同机）时，用 refUploadUrlOverride 覆盖。
          *
          * @return string
@@ -2888,7 +2888,7 @@ namespace {
                         . '）'
                         . ($isHtml ? '，而是一整页网页' : '')
                         . ' —— 「Qwen 服务端地址」很可能填错了（指到了别的服务/后台界面），'
-                        . '它应指向接收端，例如 http://<主机>:8899/v1'
+                        . '它应指向接收端，例如 http://<主机>:8894/v1'
                         . ('' !== $snippet ? '。响应开头：' . $snippet : '');
                 }
 
