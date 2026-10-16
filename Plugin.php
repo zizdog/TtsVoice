@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.10
+ * @version 1.6.11
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.6.10';
+        const VERSION = '1.6.11';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -1872,6 +1872,19 @@ namespace {
                     . '<audio id="ttsv-vp-audio" controls preload="none"></audio>'
                     . '</div>';
 
+                /*
+                 * 【如实说明】样本只在**网站本机**、还没推到 TTS 主机（refAudioPath 为空）时，
+                 * 提交是**不会**带 ref_audio 的 —— 服务端会用它的默认音色。
+                 * 不写清楚的话，「已上传音色样本」会让人以为用的就是自己的声音。
+                 */
+                if ('' === trim((string) self::opt('refAudioPath', ''))) {
+                    $h .= '<div class="ttsv-vp-row"><span class="ttsv-vp-meta" style="color:#b26a00">'
+                        . _t('这份样本<b>只在网站本机</b>，还没推到 TTS 主机 —— '
+                            . '现在提交会用主机的<b>默认音色</b>。'
+                            . '想用自己的声音：到「管理 → 朗读」点「重新同步到 TTS 主机」，或在下面重新上传一次。')
+                        . '</span></div>';
+                }
+
                 // 本机没有 ffmpeg → 样本没被裁剪/归一化，这里说清「会怎样」
                 if ('' === self::ffmpegPath()) {
                     $isWav = ('WAV' === $ext);
@@ -1889,7 +1902,7 @@ namespace {
                 $h .= '<div class="ttsv-vp-row">'
                     . '<span class="ttsv-vp-badge is-off">' . _t('未上传') . '</span>'
                     . '<span class="ttsv-vp-meta">'
-                    . '<b style="color:#c0392b">' . _t('还没有样本 —— 这是唯一的音色来源，没它无法生成。') . '</b>'
+                    . '<span>' . _t('未上传音色样本 —— <b>不影响使用</b>，提交时会用 TTS 主机的默认音色。') . '</span>'
                     . '</span>'
                     . '</div>';
             }
@@ -2053,6 +2066,15 @@ namespace {
          */
         public static function refVoiceTag()
         {
+            /*
+             * 只认「已推到 TTS 主机」的样本（refAudioPath）。
+             * 网站本机留着旧样本、但没推到主机时，任务里显示「默认音色」才与实际一致
+             * （此时提交不带 ref_audio，接收端用的是它自己的 default 音色）。
+             */
+            if ('' === trim((string) self::opt('refAudioPath', ''))) {
+                return '';
+            }
+
             $hash = self::refAudioHash();
 
             return '' === $hash ? '' : 'ref:' . substr($hash, 0, 8);
@@ -2061,8 +2083,9 @@ namespace {
         /**
          * 当前有没有可用的音色样本（上传并处理后的文件在不在）
          *
-         * 【为什么它就是全部】插件现在**只支持克隆**：模型固定 1.7B-Base，
-         * 音色唯一来源就是这份样本。所以「有没有样本」= 「能不能合成」。
+         * 【语义】只表示「网站本机留着一份样本文件」，用于界面展示与试听。
+         * 1.6.8 起样本是**可选**的：TTS 主机有自己的默认音色，没有样本也能合成；
+         * 真正决定「这次用不用克隆音色」的是 refAudioPath（主机上的路径）。
          *
          * @return bool
          */
@@ -2310,7 +2333,7 @@ namespace {
         {
             $tag = self::refVoiceTag();
 
-            return '' === $tag ? 'no-sample' : $tag;
+            return '' === $tag ? '默认音色' : $tag;
         }
 
         /**

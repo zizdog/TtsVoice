@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.10
+ * @version 1.6.11
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
@@ -255,9 +255,10 @@ if ('doctor' === $panelAction) {
                             <?php } ?>
                         <?php } else { ?>
                             <p style="margin:0 0 10px">
-                                <b class="ttsv-txt-danger"><?php _e('还没有音色样本'); ?></b>
-                                <span class="ttsv-txt-danger" style="font-size:13px">
-                                    <?php _e('—— 本插件只支持自定义音色，没有样本就**无法生成**。请先在下面上传一段 10 秒以上的人声，再回列表点「生成」。'); ?>
+                                <?php _e('未上传音色样本 —— '); ?>
+                                <b><?php _e('不影响使用'); ?></b>
+                                <span style="font-size:13px;color:#888">
+                                    <?php _e('：提交时用 TTS 主机的默认音色。想用自己的声音，可在下面上传一段 10 秒以上的人声。'); ?>
                                 </span>
                             </p>
                         <?php } ?>

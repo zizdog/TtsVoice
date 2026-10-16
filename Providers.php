@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.10
+ * @version 1.6.11
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -1986,25 +1986,19 @@ if (!class_exists('TtsVoice_Provider', false)) {
         protected function submitRemoteJob($cid, $title, array $chunks)
         {
             /*
-             * 【1.6.8 起音色样本可选】TTS 主机上有一份默认音色（接收端的 default 来源），
-             * 所以「网站没上传样本」不再拦：不带 ref_audio / source 提交，
-             * 接收端会自动回落到它自己的 <dir>/default/ref.wav。
+             * 【音色样本是**可选**的】TTS 主机上有一份默认音色（接收端的 default 来源），
+             * 所以这里**绝不因为样本缺失/未推送而拦截提交**：
              *
-             * 上传过样本时保持原行为：ref_audio 必须是 **TTS 主机上** 的路径
-             * （接收端会校验存在性），并带上 source 以便多站点对账。
+             *   · refAudioPath 有值（= 样本已推到 TTS 主机、拿到的是**主机上的路径**）
+             *     → 带 ref_audio + source 提交，用你自己的克隆音色；
+             *   · refAudioPath 为空（没上传 / 只上传到网站本机 / 换了主机导致失效）
+             *     → **不带** ref_audio 提交，接收端自动用它的 <dir>/default/ref.wav。
+             *
+             * 注意不能把「网站本机的路径」当 ref_audio 发过去 —— 接收端读的是
+             * **它自己那台机器**上的路径，发过去只会得到 "ref_audio not found"。
+             * 所以这里只认 refAudioPath，不再回落到 refAudioFile()。
              */
-            $refAudio = trim((string) TtsVoice_Plugin::refAudioForHost());
-
-            if ('' !== $refAudio
-                && '' === trim((string) TtsVoice_Plugin::opt('refAudioPath', ''))
-                && '' !== trim((string) TtsVoice_Plugin::refUploadUrl())) {
-                // 样本只在**网站这台机器**上、还没推到 TTS 主机 —— 提前说清怎么修，
-                // 否则远端只会回一句 "ref_audio not found"。
-                return $this->fail(
-                    '音色样本还没推送到 TTS 主机（当前只有网站本机的路径）。'
-                    . '请到「设置 → TtsVoice → 音色样本」点「重新同步到 TTS 主机」，或重新上传一次样本。'
-                );
-            }
+            $refAudio = trim((string) TtsVoice_Plugin::opt('refAudioPath', ''));
 
             $payloadChunks = array();
 
@@ -2807,13 +2801,30 @@ if (!class_exists('TtsVoice_Provider', false)) {
             //
             // 云端 OpenAI 没有「克隆」这个概念，仍用 openaiModel + voice。
             if ($local) {
-                $payload['model']     = $this->cloneModel();
-                $payload['ref_audio'] = TtsVoice_Plugin::refAudioForHost();
+                $payload['model'] = $this->cloneModel();
 
-                $refText = TtsVoice_Plugin::refText();
+                /*
+                 * 【音色样本可选】只带**服务端能读到**的路径：
+                 *   · refAudioPath（已推到 TTS 主机）优先；
+                 *   · 没配接收端（同机 / 共享存储）时，本机路径就是服务端路径；
+                 *   · 两者都没有 → 不带 ref_audio，服务端用它的默认音色。
+                 * 绝不能把「网站本机路径」发给**异地**接收端（它读自己那台机器，只会报
+                 * "ref_audio not found"）。
+                 */
+                $refHost = trim((string) TtsVoice_Plugin::opt('refAudioPath', ''));
 
-                if ('' !== $refText) {
-                    $payload['ref_text'] = $refText;
+                if ('' === $refHost && '' === trim((string) TtsVoice_Plugin::refUploadUrl())) {
+                    $refHost = trim((string) TtsVoice_Plugin::refAudioFile());
+                }
+
+                if ('' !== $refHost) {
+                    $payload['ref_audio'] = $refHost;
+
+                    $refText = TtsVoice_Plugin::refText();
+
+                    if ('' !== $refText) {
+                        $payload['ref_text'] = $refText;
+                    }
                 }
             } else {
                 $payload['model'] = $this->model();
