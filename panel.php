@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.3
+ * @version 1.7.4
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
@@ -768,9 +768,11 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
                     }
                 }
 
+                // 自建 Qwen3-TTS 本来就没有「预置音色列表」：
+                // 有样本就用样本克隆，没样本就用主机内置的默认音色 —— 空列表不是错误。
                 voiceBox.textContent = names.length
                     ? '可用音色（' + names.length + '）：' + names.join('、')
-                    : '未获取到音色列表';
+                    : '无需选择音色：默认使用 TTS 主机内置音色';
 
                 // 同步型服务的音色由配置决定，服务端会附一段说明
                 if (res.data && res.data.note) {

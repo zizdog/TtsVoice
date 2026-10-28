@@ -1065,7 +1065,7 @@
 
         if (clearBtn) {
             clearBtn.addEventListener('click', function () {
-                if (!window.confirm('确定删除音色样本？\n删除后若「音色」是自定义音色，会暂时回退到预置音色（CustomVoice 模型）。')) {
+                if (!window.confirm('确定删除音色样本？\n删除后提交会改用 TTS 主机的默认音色（已上传到主机的样本也会被清掉）。')) {
                     return;
                 }
 

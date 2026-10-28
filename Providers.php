@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.3
+ * @version 1.7.4
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -1383,7 +1383,8 @@ if (!class_exists('TtsVoice_Provider', false)) {
         /**
          * 可用音色列表
          *
-         * 自建 Qwen3-TTS 没有预置音色：音色完全由上传的「音色样本」决定。
+         * 自建 Qwen3-TTS 没有「预置音色列表」：主机已内置默认音色，
+         * 上传样本则用样本克隆。
          *
          * @return array
          */
@@ -1393,8 +1394,8 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 'ok'     => true,
                 'error'  => '',
                 'voices' => array(),
-                'note'   => '自建 Qwen3-TTS 只支持「自定义音色」：没有预置音色列表，'
-                            . '音色完全由上传的「音色样本」决定。',
+                'note'   => 'TTS 主机已内置默认音色 —— 不上传样本也能直接生成；'
+                            . '想用自己的声音，可在面板上传一段 10 秒以上的人声做克隆。',
             );
         }
 
