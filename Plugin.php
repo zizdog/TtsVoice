@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.6
+ * @version 1.7.7
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.7.6';
+        const VERSION = '1.7.7';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -55,10 +55,10 @@ namespace {
         /**
          * 参考音频裁剪长度（秒）
          *
-         * 音色克隆的参考音频不是越长越好：10~15 秒已经足够捕捉音色，
+         * 音色克隆的参考音频不是越长越好：20 秒以内足够捕捉音色，
          * 太长反而会拖慢每次合成的编码开销（参考音频每块都要重新编码一次）。
          */
-        const REF_AUDIO_SECONDS = 12;
+        const REF_AUDIO_SECONDS = 20;
 
         /**
          * 「音色」下拉里代表「自定义音色」的特殊值
@@ -385,8 +385,7 @@ namespace {
                 NULL,
                 'http://127.0.0.1:8894/v1',
                 _t('Qwen 服务端地址'),
-                _t('形如 <code>http://主机:8894/v1</code>，<b>结尾必须带 <code>/v1</code></b>。'
-                    . '走接收端（8894）才支持鉴权、排队与音色样本上传。')
+                _t('形如 <code>http://主机:8894/v1</code>，<b>结尾必须带 /v1</b>。')
             );
             $form->addInput($openaiBase);
 
@@ -396,8 +395,7 @@ namespace {
                 NULL,
                 '',
                 _t('Qwen 鉴权 Key'),
-                _t('接收端 / 反向代理要求的密钥，作为 <code>Authorization: Bearer …</code> 发送；'
-                    . '直连没开鉴权的服务可留空。只存在服务器端。')
+                _t('接收端要求的密钥（<code>Authorization: Bearer</code>）；无鉴权可留空。')
             );
             $form->addInput($openaiKey);
 
@@ -411,8 +409,7 @@ namespace {
                 ),
                 'chars',
                 _t('分块方式'),
-                _t('正文怎么切块。<b>按字数</b>：在句末标点处按长度切，简单稳定。'
-                    . '<b>按段落</b>：以 Markdown 标题（<code>##</code>）为界分段，语流更自然、章节时间轴更准。')
+                _t('<b>按字数</b>：句末标点处切，稳定；<b>按段落</b>：以 Markdown 标题为界，语流更自然。')
             );
             $form->addInput($chunkMode);
 
@@ -423,7 +420,7 @@ namespace {
                 NULL,
                 self::defaults()['chunkChars'],
                 _t('分块长度（字符）'),
-                _t('单块上限字符数，超出会在句末标点处再切。留空或 0 用默认 <b>120</b>；Qwen 常用 <b>100~200</b>。')
+                _t('单块上限字符数，留空用默认 <b>120</b>；常用 <b>100~200</b>。')
             );
             $form->addInput($chunk);
 
@@ -450,9 +447,7 @@ namespace {
                 ),
                 '0',
                 _t('播放器挂载方式'),
-                _t('<b>手动</b>：在主题模板里写 <code>&lt;?php TtsVoice_Plugin::renderPlayer(); ?&gt;</code>'
-                    . '（用了 PJAX / 局部刷新的主题必须选它）。'
-                    . '<b>自动</b>：插件自己输出，需主题 <code>footer.php</code> 里有 <code>$this->footer()</code>。')
+                _t('<b>手动</b>：模板里调用 <code>renderPlayer()</code>（PJAX 主题选它）；<b>自动</b>：跟随页脚输出。')
             );
             $form->addInput($auto);
 
@@ -462,8 +457,7 @@ namespace {
                 NULL,
                 '',
                 _t('自动插入位置（DOM id）'),
-                _t('仅「自动插入」时生效。填主题里某个元素的 id（不用写 <code>#</code>）；'
-                    . '留空输出在页脚，id 不存在时也会留在页脚。')
+                _t('元素的 DOM id（不用写 #），留空则输出在页脚。')
             );
             $form->addInput($targetId);
 
@@ -476,7 +470,7 @@ namespace {
                 ),
                 'post',
                 _t('显示范围'),
-                _t('控制哪些类型的内容页自动插入播放器。')
+                _t('自动插入作用于哪些内容类型。')
             );
             $form->addInput($scope);
 
@@ -486,7 +480,7 @@ namespace {
                 array('1' => _t('显示'), '0' => _t('隐藏')),
                 '1',
                 _t('章节跳转'),
-                _t('正文有小标题时，播放器下方显示可点击跳转的章节列表。')
+                _t('显示可点击的章节列表。')
             );
             $form->addInput($chapters);
 
@@ -496,7 +490,7 @@ namespace {
                 array('1' => _t('显示'), '0' => _t('隐藏')),
                 '1',
                 _t('下载按钮'),
-                _t('在播放器上显示音频下载链接（格式跟随「输出格式」）。')
+                _t('显示音频下载链接。')
             );
             $form->addInput($download);
 
@@ -506,7 +500,7 @@ namespace {
                 NULL,
                 self::defaults()['timeout'],
                 _t('请求超时（秒）'),
-                _t('访问 TTS 服务的连接超时，公网 / 反向代理建议 <b>15~60</b>；合成单块时按它的 4 倍放宽。')
+                _t('连接超时（秒），公网建议 <b>15~60</b>。')
             );
             $form->addInput($timeout);
 
@@ -519,7 +513,7 @@ namespace {
                 ),
                 '1',
                 _t('HTTPS 证书校验'),
-                _t('用 <code>https://</code> 访问 TTS 服务时是否校验证书；只有自签证书且确认是自己的服务才选「跳过验证」。')
+                _t('访问 https 时校验证书；仅自签且确认是自己的服务才跳过。')
             );
             $form->addInput($verifySsl);
 
@@ -529,7 +523,7 @@ namespace {
                 array('1' => _t('保留'), '0' => _t('删除')),
                 '1',
                 _t('禁用时保留任务数据'),
-                _t('选「删除」时，禁用插件会清空任务记录（磁盘上的音频文件始终保留）。')
+                _t('禁用时是否清空任务记录（音频文件始终保留）。')
             );
             $form->addInput($keep);
 
@@ -553,8 +547,7 @@ namespace {
                 NULL,
                 '',
                 _t('音色样本的文本（可选）'),
-                _t('上面那段样本<b>实际说了什么</b>；<b>留空最稳</b>（只用说话人嵌入）。'
-                    . '填了就必须与音频逐字一致，否则句尾会冒出杂音。')
+                _t('样本实际说了什么；<b>留空最稳</b>，填了必须逐字一致。')
             );
             $form->addInput($refText);
 
@@ -564,8 +557,7 @@ namespace {
                 NULL,
                 self::defaults()['openaiFormat'],
                 _t('输出格式'),
-                _t('<code>wav</code>：24kHz 单声道无损（约 48 KB/s）；<code>mp3</code>：体积约 1/3，兼容性最好。'
-                    . '服务端没装 ffmpeg 时会自动按 wav 出片。')
+                _t('<code>wav</code> 无损；<code>mp3</code> 体积约 1/3，长文更省空间。')
             );
             $form->addInput($openaiFormat);
 
@@ -575,7 +567,7 @@ namespace {
                 NULL,
                 self::defaults()['openaiSpeed'],
                 _t('语速'),
-                _t('合成后用本机 ffmpeg 变速（不改音高）。<code>1.0</code> = 原速，<code>1.25</code> = 快 25%。')
+                _t('本机 ffmpeg 变速（不改音高），<code>1.0</code> = 原速。')
             );
             $form->addInput($openaiSpeed);
 
@@ -1772,28 +1764,17 @@ namespace {
             $h .= '<span id="ttsv-vp-msg"></span>'
                 . '</div>';
 
-            // ---- 说明 ----
+            // ---- 说明（一句话足够，细节见 README） ----
             $h .= '<p class="description ttsv-vp-desc">'
                 . sprintf(
-                    _t('上传后会自动裁到 <b>%d 秒</b>并转成 24kHz 单声道 wav；'
-                        . '建议用一段无背景音乐、无第二人说话的独白，10 秒以上。<br>'
-                        . '<b>只有当上面「音色」选的是「自定义音色」、且这里上传了样本时，'
-                        . '插件才会用它来克隆你的音色</b>（本插件只支持自定义音色，样本是必填项）。<br>'
-                        . '样本里说的内容<b>不用写下来</b>（下面那项「音色样本的文本」保持留空即可，'
-                        . '内容对不上反而会引入杂音）。<br>'
-                        . '若本站没有 ffmpeg，上传的样本会<b>原样推送</b>（不裁剪、不转码）；'
-                        . 'TTS 主机侧也没有 ffmpeg 时它只能校验 wav，非 wav 会被拒收 —— '
-                        . '此时给它装 ffmpeg，或在本站装 ffmpeg 后重新上传即可。'),
+                    _t('上传后自动裁到 <b>%d 秒</b>、转 24kHz 单声道；内容不用写下来。'),
                     self::REF_AUDIO_SECONDS
                 );
 
             if ('' !== $url) {
-                $h .= '<br>' . _t('上传会推送到')
+                $h .= '<br>' . _t('上传到')
                     . ' <code>' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8') . '</code>'
-                    . ('' === $tok
-                        ? '（<span style="color:#c0392b">' . _t('服务端未启用鉴权，不发送密钥') . '</span>）'
-                        : '（' . _t('已带密钥') . '）')
-                    . '　' . _t('地址由上面的「Qwen 服务端地址」自动推导，不用另填。');
+                    . '（由「Qwen 服务端地址」自动推导）';
             } else {
                 $h .= '<br><span style="color:#c0392b">'
                     . _t('还没填上面的「Qwen 服务端地址」，样本无法推送到 TTS 主机。')
@@ -1967,7 +1948,7 @@ namespace {
             // 1.6.8 起音色样本**可选**：TTS 主机上有默认音色，不上传也能生成。
             // 这条文案只在「想说明为什么用的是默认音色」时展示。
             return '当前使用 TTS 主机的默认音色；'
-                . '想用自己的声音，可到「设置 → TtsVoice → 高级设置」上传一段 10 秒以上的人声。';
+                . '想用自己的声音，可到「设置 → TtsVoice → 高级设置」上传一段人声（20 秒以内）。';
         }
 
         /**

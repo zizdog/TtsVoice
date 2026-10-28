@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.6
+ * @version 1.7.7
  */
 class TtsVoice_Doctor
 {
@@ -191,7 +191,7 @@ class TtsVoice_Doctor
      *
      * 没有 ffmpeg **不是故障**：合成照跑、音频照出，只是
      *   1) 设置的语速不会生效（无法 atempo，出原速）；
-     *   2) 音色样本不做 12 秒/24k/单声道 规整，按原样上传；
+     *   2) 音色样本不做 20 秒/24k/单声道 规整，按原样上传；
      *   3) 服务端只吐 WAV 时插件会照收（面板会显示一条 [提示]）。
      * 所以这一行只是「告诉你为什么听起来没变快 / 为什么是 WAV」，别当成错误。
      */

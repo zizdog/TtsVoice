@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.6
+ * @version 1.7.7
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
