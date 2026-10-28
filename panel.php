@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.7
+ * @version 1.7.8
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
@@ -672,20 +672,16 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
                 var names  = [];
 
                 if (Array.isArray(voices)) {
-                    names = voices;
-                } else {
-                    for (var k in voices) {
-                        if (Object.prototype.hasOwnProperty.call(voices, k)) {
-                            names.push(voices[k]);
-                        }
-                    }
+                    names = voices.map(function (v) {
+                        return (v && v.name) ? v.name : String(v);
+                    });
                 }
 
                 if (!names.length) {
-                    names = ['服务器默认音色（内置）'];
+                    names = ['服务器默认音色'];
                 }
 
-                // 一行显示：服务器默认音色 + 我自己的样本
+                // 一行显示：内置 / 我的音色 / 我上传的（只显示 name）
                 voiceBox.textContent = names.join(' · ');
             });
         });

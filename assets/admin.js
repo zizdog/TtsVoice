@@ -1096,9 +1096,152 @@
         }
     }
 
+
+    /* ---------------- 设置页：音色选择（多音色） ---------------- */
+    /*
+     * 列表来自 TTS 主机的 /voice/sources（kind: builtin/custom/uploaded），
+     * 显示用 name，合成用 source —— 前端不写死任何 id 或名字。
+     * 选中的 source/name 写进同名的 hidden input，随表单一起保存。
+     */
+    function bindVoiceSelect() {
+        var box = document.getElementById('ttsv-vs');
+
+        if (!box) {
+            return;
+        }
+
+        var sel       = document.getElementById('ttsv-vs-select');
+        var refresh   = document.getElementById('ttsv-vs-refresh');
+        var preview   = document.getElementById('ttsv-vs-preview');
+        var msg       = document.getElementById('ttsv-vs-msg');
+        var hidden    = document.querySelector('[name="voiceSource"]');
+        var hiddenName = document.querySelector('[name="voiceSourceName"]');
+        var saved     = hidden ? hidden.value : '';
+        var audio     = null;
+
+        function say(text) {
+            if (msg) {
+                msg.textContent = text || '';
+            }
+        }
+
+        function itemLabel(item) {
+            var bits = [];
+
+            if (item.language) { bits.push(item.language); }
+            if (item.gender) { bits.push(item.gender); }
+            if (item.duration) { bits.push(Number(item.duration).toFixed(1) + 's'); }
+
+            return item.name + (bits.length ? '（' + bits.join(' · ') + '）' : '');
+        }
+
+        function sync() {
+            var opt = sel.options[sel.selectedIndex];
+
+            if (hidden) { hidden.value = sel.value; }
+            if (hiddenName) { hiddenName.value = opt ? (opt.getAttribute('data-name') || sel.value) : ''; }
+
+            say(sel.value ? (opt ? opt.textContent : sel.value) : '服务器默认音色');
+        }
+
+        function fill(items) {
+            var groups = { builtin: '内置音色', custom: '我的音色', uploaded: '我上传的' };
+
+            sel.innerHTML = '';
+
+            var base = document.createElement('option');
+            base.value = '';
+            base.textContent = '服务器默认音色';
+            sel.appendChild(base);
+
+            Object.keys(groups).forEach(function (kind) {
+                var list = items.filter(function (i) { return (i.kind || '') === kind; });
+
+                if (!list.length) {
+                    return;
+                }
+
+                var og = document.createElement('optgroup');
+                og.label = groups[kind];
+
+                list.forEach(function (i) {
+                    var o = document.createElement('option');
+                    o.value = i.source;
+                    o.textContent = itemLabel(i);
+                    o.setAttribute('data-name', i.name);
+                    og.appendChild(o);
+                });
+
+                sel.appendChild(og);
+            });
+
+            // 恢复已保存的选择；服务端已经删掉的来源就退回默认
+            if (saved) {
+                for (var i = 0; i < sel.options.length; i++) {
+                    if (sel.options[i].value === saved) {
+                        sel.selectedIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            sync();
+        }
+
+        function load() {
+            say('拉取中…');
+
+            get('voices', { _: Date.now() }, function (res) {
+                if (0 !== res.code || !res.data || !res.data.voices) {
+                    say(res.msg || '拉取失败');
+                    return;
+                }
+
+                fill(res.data.voices);
+            });
+        }
+
+        sel.addEventListener('change', sync);
+
+        if (refresh) {
+            refresh.addEventListener('click', load);
+        }
+
+        if (preview) {
+            preview.addEventListener('click', function () {
+                if (!sel.value) {
+                    say('先选一个具体音色再试听');
+                    return;
+                }
+
+                try {
+                    if (audio) {
+                        audio.pause();
+                    }
+
+                    audio = new Audio(ACTION + 'voicepreview?_token=' + encodeURIComponent(TOKEN)
+                        + '&source=' + encodeURIComponent(sel.value));
+
+                    var p = audio.play();
+
+                    if (p && p.catch) {
+                        p.catch(function () { say('试听失败（音色音频不可用）'); });
+                    }
+
+                    say('试听中…');
+                } catch (e) {
+                    say('试听失败');
+                }
+            });
+        }
+
+        load();
+    }
+
     /* ---------------- 启动 ---------------- */
 
     bindEditor();
     bindList();
     bindVoicePicker();
+    bindVoiceSelect();
 })();

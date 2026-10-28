@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.7
+ * @version 1.7.8
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -1381,16 +1381,66 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /**
-         * 可用音色（只列「服务器默认」和「你自己的样本」）
+         * 把接收端返回的一条 source 规整成统一结构
          *
-         * 接收端的 `/voice/sources` 会列出**所有**来源（多站点共用一台主机时包含别人的），
-         * 面板只该看到与自己相关的两项：内置 default + 本插件的 refSourceId。
+         * 新服务端会直接给 kind/name/description/language/gender/audio_path；
+         * 老服务端只有 source/path/ref_text —— 这里做兼容，UI 只认统一字段，
+         * **不写死任何 source id 或名字**。
          *
-         * @return array {ok, error, voices, note}
+         * @param array $item
+         * @return array
+         */
+        protected function normalizeVoiceItem(array $item)
+        {
+            $own    = trim((string) TtsVoice_Plugin::refSourceId());
+            $source = (string) (isset($item['source']) ? $item['source'] : '');
+            $kind   = (string) (isset($item['kind']) ? $item['kind'] : '');
+
+            if ('' === $kind) {
+                // 兼容旧服务端：default → builtin；本站来源 → uploaded；其余 → custom
+                if ('default' === $source) {
+                    $kind = 'builtin';
+                } elseif ('' !== $own && $source === $own) {
+                    $kind = 'uploaded';
+                } else {
+                    $kind = 'custom';
+                }
+            }
+
+            $name = trim((string) (isset($item['name']) ? $item['name'] : ''));
+
+            if ('' === $name) {
+                $name = ('builtin' === $kind) ? '默认音色'
+                    : (('uploaded' === $kind) ? '我上传的样本' : $source);
+            }
+
+            $desc = (string) (isset($item['description'])
+                ? $item['description']
+                : (isset($item['ref_text']) ? $item['ref_text'] : ''));
+
+            $audioPath = (string) (isset($item['audio_path'])
+                ? $item['audio_path']
+                : (isset($item['path']) ? $item['path'] : ''));
+
+            return array(
+                'source'      => $source,
+                'kind'        => $kind,
+                'name'        => $name,
+                'description' => $desc,
+                'language'    => (string) (isset($item['language']) ? $item['language'] : ''),
+                'gender'      => (string) (isset($item['gender']) ? $item['gender'] : ''),
+                'duration'    => round(floatval(isset($item['duration']) ? $item['duration'] : 0), 2),
+                'audio_path'  => $audioPath,
+            );
+        }
+
+        /**
+         * 音色列表（服务器默认 / 我的音色 / 我上传的）
+         *
+         * @return array {ok, error, voices(array of normalized items), note}
          */
         public function voices()
         {
-            $own      = trim((string) TtsVoice_Plugin::refSourceId());
             $response = $this->receiverRequest('GET', '/voice/sources', NULL, 8);
 
             if (NULL === $response) {
@@ -1420,27 +1470,69 @@ if (!class_exists('TtsVoice_Provider', false)) {
             $voices  = array();
 
             foreach ($sources as $item) {
-                $src = (string) (isset($item['source']) ? $item['source'] : '');
-                $sec = round(floatval(isset($item['duration']) ? $item['duration'] : 0), 1);
-                $tag = $sec > 0 ? '（' . $sec . ' 秒）' : '';
-
-                if ('default' === $src) {
-                    $voices[] = '服务器默认音色' . $tag;
-                } elseif ('' !== $own && $src === $own) {
-                    $voices[] = '我的样本' . $tag;
+                if (!is_array($item)) {
+                    continue;
                 }
+
+                $voice = $this->normalizeVoiceItem($item);
+
+                if ('' === $voice['source']) {
+                    continue;
+                }
+
+                $voices[] = $voice;
             }
 
-            if (empty($voices)) {
-                $voices[] = '服务器默认音色（内置）';
+            return array('ok' => true, 'error' => '', 'voices' => $voices, 'note' => '');
+        }
+
+        /**
+         * 取某个音色的试听音频（接收端 v1.7.x：GET /voice/sources/{source}/audio）
+         *
+         * @param string $source
+         * @return array {ok, error, body, content_type}
+         */
+        public function voiceSourceAudio($source)
+        {
+            $source = trim((string) $source);
+
+            if ('' === $source) {
+                return array('ok' => false, 'error' => '缺少音色标识', 'body' => '', 'content_type' => '');
             }
 
-            return array(
-                'ok'     => true,
-                'error'  => '',
-                'voices' => $voices,
-                'note'   => '只显示服务器默认音色和你上传的样本',
+            $response = $this->receiverRequest(
+                'GET',
+                '/voice/sources/' . rawurlencode($source) . '/audio',
+                NULL,
+                20
             );
+
+            if (NULL === $response) {
+                return array('ok' => false, 'error' => '未配置接收端地址', 'body' => '', 'content_type' => '');
+            }
+
+            if (!$response['ok']) {
+                return array('ok' => false, 'error' => (string) $response['error'], 'body' => '', 'content_type' => '');
+            }
+
+            if (200 !== $response['code']) {
+                return array(
+                    'ok'    => false,
+                    'error' => 'HTTP ' . $response['code'] . '：' . $this->receiverError($response),
+                    'body'  => '',
+                    'content_type' => '',
+                );
+            }
+
+            if ('' === (string) $response['body']) {
+                return array('ok' => false, 'error' => '试听音频为空', 'body' => '', 'content_type' => '');
+            }
+
+            $type = isset($response['headers']['content-type'])
+                ? (string) $response['headers']['content-type']
+                : 'audio/wav';
+
+            return array('ok' => true, 'error' => '', 'body' => (string) $response['body'], 'content_type' => $type);
         }
 
         /**
@@ -1521,7 +1613,8 @@ if (!class_exists('TtsVoice_Provider', false)) {
              * **它自己那台机器**上的路径，发过去只会得到 "ref_audio not found"。
              * 所以这里只认 refAudioPath，不再回落到 refAudioFile()。
              */
-            $refAudio = trim((string) TtsVoice_Plugin::opt('refAudioPath', ''));
+            $refAudio    = trim((string) TtsVoice_Plugin::opt('refAudioPath', ''));
+            $voiceSource = trim((string) TtsVoice_Plugin::opt('voiceSource', ''));
 
             $payloadChunks = array();
 
@@ -1547,9 +1640,28 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 'chunks'          => $payloadChunks,
             );
 
-            if ('' !== $refAudio) {
-                // 本次用的是「哪个来源」的音色样本（receiver v1.5.0+ 会记进任务与日志，
-                // 多站点共用一台 TTS 主机时便于对账）。
+            /*
+             * 音色优先级（2026-10-28 多音色）：
+             *   1. 设置页选了某个音色（builtin / custom / uploaded）→ 只发 source，
+             *      由接收端按 source 解析；**不写死任何 id 或名字**。
+             *   2. 选的就是「我上传的样本」且主机上有路径 → 额外带 ref_audio（更精确，
+             *      同 source 下即使主机文件被换掉也以路径为准）。
+             *   3. 没选音色 → 沿用旧行为：有 refAudioPath 就带 ref_audio，否则完全不发，
+             *      接收端回落它的 default 音色。
+             */
+            if ('' !== $voiceSource) {
+                $payload['source'] = $voiceSource;
+
+                if ($voiceSource === TtsVoice_Plugin::refSourceId() && '' !== $refAudio) {
+                    $payload['ref_audio'] = $refAudio;
+
+                    $refText = TtsVoice_Plugin::refText();
+
+                    if ('' !== $refText) {
+                        $payload['ref_text'] = $refText;
+                    }
+                }
+            } elseif ('' !== $refAudio) {
                 $payload['source']    = TtsVoice_Plugin::refSourceId();
                 $payload['ref_audio'] = $refAudio;
 
@@ -1559,7 +1671,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
                     $payload['ref_text'] = $refText;
                 }
             }
-            // 没样本：不带 source/ref_audio → 接收端用 default 音色
 
             $response = $this->receiverRequest(
                 'POST',

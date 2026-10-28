@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.7
+ * @version 1.7.8
  */
 class TtsVoice_Action extends Typecho_Widget
 {
@@ -61,7 +61,7 @@ class TtsVoice_Action extends Typecho_Widget
     {
         $do = strtolower(preg_replace('/[^a-zA-Z0-9_]/', '', (string) $this->param('do', '')));
 
-        $known = array('submit', 'status', 'batch', 'delete', 'voices', 'health', 'hoststatus', 'uploadvoice', 'clearvoice', 'syncvoice', 'voice');
+        $known = array('submit', 'status', 'batch', 'delete', 'voices', 'voicepreview', 'health', 'hoststatus', 'uploadvoice', 'clearvoice', 'syncvoice', 'voice');
 
         if (!in_array($do, $known, true)) {
             return $this->json(array(), 404, '接口不存在：' . $do);
@@ -116,6 +116,9 @@ class TtsVoice_Action extends Typecho_Widget
 
             case 'voices':
                 return $this->actVoices();
+
+            case 'voicepreview':
+                return $this->actVoicePreview();
 
             case 'health':
                 return $this->actHealth();
@@ -425,6 +428,45 @@ class TtsVoice_Action extends Typecho_Widget
     protected function provider()
     {
         return new TtsVoice_Provider_OpenAI();
+    }
+
+    /**
+     * 试听某个音色（服务端 `/voice/sources/{source}/audio`）
+     *
+     * 返回二进制 wav，不能走 json()。管理员鉴权 + CSRF 由 dispatch 统一做。
+     *
+     * @return void
+     */
+    protected function actVoicePreview()
+    {
+        $source = trim((string) $this->param('source', ''));
+
+        if ('' === $source) {
+            return $this->json(array(), 400, '缺少音色标识');
+        }
+
+        $result = $this->provider()->voiceSourceAudio($source);
+
+        if (empty($result['ok'])) {
+            return $this->json(array(), 502, '试听失败：' . (isset($result['error']) ? $result['error'] : '未知错误'));
+        }
+
+        $body = (string) $result['body'];
+        $type = (string) $result['content_type'];
+
+        if ('' === $type || 0 !== strpos($type, 'audio/')) {
+            $type = 'audio/wav';
+        }
+
+        if (!headers_sent()) {
+            header('Content-Type: ' . $type);
+            header('Content-Length: ' . strlen($body));
+            header('Cache-Control: private, max-age=300');
+            header('X-Content-Type-Options: nosniff');
+        }
+
+        echo $body;
+        exit;
     }
 
     /**

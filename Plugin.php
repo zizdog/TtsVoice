@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.7
+ * @version 1.7.8
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.7.7';
+        const VERSION = '1.7.8';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -291,20 +291,22 @@ namespace {
                 . '}'
                 . 'function buildAdv(){'
                 . 'if(document.querySelector(".ttsv-adv")){return;}'
+                . 'var vs=document.getElementById("ttsv-vs");'
                 . 'var vp=document.getElementById("ttsv-vp");'
                 . 'var first=row(ADV[0]);'
-                . 'var anchor=(vp&&vp.parentNode)?vp:first;'
+                . 'var anchor=(vs&&vs.parentNode)?vs:((vp&&vp.parentNode)?vp:first);'
                 . 'if(!anchor||!anchor.parentNode){return;}'
                 . 'var host=anchor.parentNode;'
                 . 'var d=document.createElement("details");'
                 . 'd.className="ttsv-adv";'
                 . 'var sm=document.createElement("summary");'
-                . 'sm.textContent="高级设置（音色样本 / 输出格式 / 语速）";'
+                . 'sm.textContent="高级设置（音色 / 样本 / 格式 / 语速）";'
                 . 'd.appendChild(sm);'
                 . 'var body=document.createElement("div");'
                 . 'body.className="ttsv-adv-body";'
                 . 'd.appendChild(body);'
                 . 'host.insertBefore(d,anchor);'
+                . 'if(vs){body.appendChild(vs);}'
                 . 'if(vp){body.appendChild(vp);}'
                 . 'for(var i=0;i<ADV.length;i++){var r=row(ADV[i]);if(r){body.appendChild(r);}}'
                 . '}'
@@ -527,9 +529,19 @@ namespace {
             );
             $form->addInput($keep);
 
-            // ---- ④ 高级设置（默认折叠：音色样本 / 输出格式 / 语速）----
+            // ---- ④ 高级设置（默认折叠：音色 / 样本 / 输出格式 / 语速）----
             // 这里只放控件；折叠由 advancedScript() 里那段 JS 把它们搬进 <details>。
             $voiceLayout = self::layoutClass();
+
+            if ('' !== $voiceLayout) {
+                try {
+                    $select = new $voiceLayout();
+                    $select->html(self::voiceSelectHtml());
+                    $form->addItem($select);
+                } catch (Throwable $e) {
+                    // 布局类不可用时忽略
+                }
+            }
 
             if ('' !== $voiceLayout) {
                 try {
@@ -577,6 +589,8 @@ namespace {
             $clsHidden = self::elementClass('Hidden');
 
             foreach (array(
+                'voiceSource'            => '',   // 选中音色的 source（空 = 服务端默认）
+                'voiceSourceName'        => '',   // 选中音色的显示名（仅缓存，用于任务标签）
                 'refAudioPath'           => '',   // 上传音色样本后由服务端返回的路径自动写入
                 'refUploadUrlOverride'   => '',   // 一般留空：接收端地址从 openaiBaseUrl 推导
                 'refUploadTokenOverride' => '',   // 一般留空：密钥复用 openaiKey
@@ -892,6 +906,10 @@ namespace {
                 // 预置音色（CustomVoice）已整体下线：openaiPresetModel / openaiVoice
                 // 两个键也从配置里删掉了，音色的唯一来源是「音色样本」。
                 'openaiCloneModel'  => 'mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit',
+                // 选中的音色来源（接收端 /voice/sources 里的 source；空 = 服务端默认）
+                'voiceSource'     => '',
+                // 显示名缓存：只用于任务列表的「音色」列，避免每次查列表
+                'voiceSourceName' => '',
                 // 【默认 mp3】长音频（30~60 分钟）用 wav 会到 100MB+/篇，磁盘吃不消；
                 // 24kHz 单声道 mp3（128k）对朗读足够，体积约 1/3。想要无损可在设置里改 wav。
                 'openaiFormat'  => 'mp3',
@@ -1659,6 +1677,40 @@ namespace {
         }
 
         /**
+         * 「音色」选择块：列表 + 刷新 + 试听
+         *
+         * 列表由 JS 从 `/ttsvoice/voices` 拉（服务端返回 kind/name/source…），
+         * **不写死任何 source id 或名字**：显示用 name，合成用 source。
+         *
+         * @return string
+         */
+        public static function voiceSelectHtml()
+        {
+            $current = self::voiceSource();
+            $label   = self::voiceSourceLabel();
+            $esc     = function ($v) {
+                return htmlspecialchars((string) $v, ENT_QUOTES, 'UTF-8');
+            };
+
+            $h = '<div class="ttsv-voice-select" id="ttsv-vs" style="margin:10px 0">';
+            $h .= '<b>' . _t('音色') . '</b> ';
+            $h .= '<select id="ttsv-vs-select" style="min-width:260px">'
+                . '<option value="">' . _t('加载中…') . '</option>'
+                . '</select> ';
+            $h .= '<button type="button" class="btn" id="ttsv-vs-refresh">' . _t('刷新列表') . '</button> ';
+            $h .= '<button type="button" class="btn" id="ttsv-vs-preview">' . _t('▶ 试听') . '</button> ';
+            $h .= '<span id="ttsv-vs-msg" style="font-size:12px;color:#999;margin-left:6px">'
+                . $esc('' === $current ? _t('服务器默认音色') : $label)
+                . '</span>';
+            $h .= '<p class="description" style="margin:6px 0 0">'
+                . _t('列表来自 TTS 主机；切换后保存即可生效。')
+                . '</p>';
+            $h .= '</div>';
+
+            return $h;
+        }
+
+        /**
          * 「音色」设置块：当前样本 + 上传/删除按钮
          *
          * 【为什么自绘 HTML】Typecho 的插件配置表单没有文件上传控件，
@@ -2161,9 +2213,45 @@ namespace {
          */
         public static function jobVoiceTag()
         {
+            $source = self::voiceSource();
+            $own    = self::refSourceId();
+
+            // 选了自己的样本（且主机上有路径）→ 用 ref: 指纹，便于识别「音色已过期」
+            if ('' !== $source && $source === $own && '' !== self::refVoiceTag()) {
+                return self::refVoiceTag();
+            }
+
+            if ('' !== $source) {
+                $label = self::voiceSourceLabel();
+
+                return '' === $label ? $source : $label;
+            }
+
             $tag = self::refVoiceTag();
 
             return '' === $tag ? '默认音色' : $tag;
+        }
+
+        /**
+         * 当前选中的音色 source（空 = 服务端默认）
+         *
+         * @return string
+         */
+        public static function voiceSource()
+        {
+            return trim((string) self::opt('voiceSource', ''));
+        }
+
+        /**
+         * 选中音色的显示名（没有缓存就退回 source）
+         *
+         * @return string
+         */
+        public static function voiceSourceLabel()
+        {
+            $name = trim((string) self::opt('voiceSourceName', ''));
+
+            return '' !== $name ? $name : self::voiceSource();
         }
 
         /**
@@ -2961,12 +3049,12 @@ namespace {
 
             $used = (string) (isset($job['voice']) ? $job['voice'] : '');
 
-            // 现在只有克隆：voice 标签恒为样本指纹。
-            if (0 !== strpos($used, 'ref:')) {
+            // 旧数据可能没有标签；空标签不判过期，避免误报
+            if ('' === $used) {
                 return false;
             }
 
-            return $used !== self::refVoiceTag();
+            return $used !== self::jobVoiceTag();
         }
 
         /**
