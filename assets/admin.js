@@ -53,6 +53,17 @@
         xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
         xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
+        var done = false;
+
+        function finish(res) {
+            if (done) {
+                return;
+            }
+
+            done = true;
+            callback(res || {});
+        }
+
         xhr.onreadystatechange = function () {
             if (4 !== xhr.readyState) {
                 return;
@@ -66,8 +77,13 @@
                 res = { code: 500, msg: '服务器返回异常' };
             }
 
-            callback(res || {});
+            finish(res);
         };
+
+        /* 网络层失败必须回调：否则轮询的 inFlight 永远是 true，进度就再也不动了 */
+        xhr.onerror = function () { finish({ code: -1, msg: '网络请求失败（连接中断）' }); };
+        xhr.ontimeout = function () { finish({ code: -1, msg: '网络请求超时' }); };
+        xhr.onabort = function () { finish({ code: -1, msg: '网络请求已取消' }); };
 
         xhr.send(body);
     }
@@ -99,6 +115,17 @@
         xhr.open('GET', ACTION + action + '?' + query, true);
         xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
 
+        var done = false;
+
+        function finish(res) {
+            if (done) {
+                return;
+            }
+
+            done = true;
+            callback(res || {});
+        }
+
         xhr.onreadystatechange = function () {
             if (4 !== xhr.readyState) {
                 return;
@@ -112,8 +139,13 @@
                 res = { code: 500, msg: '服务器返回异常' };
             }
 
-            callback(res || {});
+            finish(res);
         };
+
+        /* 网络层失败必须回调：否则轮询的 inFlight 永远是 true，进度就再也不动了 */
+        xhr.onerror = function () { finish({ code: -1, msg: '网络请求失败（连接中断）' }); };
+        xhr.ontimeout = function () { finish({ code: -1, msg: '网络请求超时' }); };
+        xhr.onabort = function () { finish({ code: -1, msg: '网络请求已取消' }); };
 
         xhr.send(null);
     }
@@ -701,6 +733,10 @@
                     // 下面的 'gen' 分支了 —— 按钮点一次就"死"。只改文案。
                     btn.textContent = '生成中…';
                     toast('已提交，正在合成');
+
+                    // 作废提交前发出的那一拍，避免旧响应把状态覆盖回去 / 停掉轮询
+                    pollSeq++;
+                    inFlight = false;
                     startPolling();
                 });
             } else if ('del' === act) {
@@ -821,6 +857,13 @@
      */
     var inFlight = false;
 
+    /*
+     * 轮询序号：提交/手动刷新时 +1。
+     * 旧请求（提交前发出的那一拍）回来时序号已经变了，直接丢弃 ——
+     * 否则它可能带着「ready」把刚置的 queued 覆盖回去，并把轮询 stop 掉。
+     */
+    var pollSeq = 0;
+
     function startPolling() {
         if (timer) {
             return;
@@ -845,12 +888,30 @@
 
         inFlight = true;
 
+        var mySeq = pollSeq;
+
         // 编辑页：单篇
         if (cfg.cid && typeof window.__TTS_EDITOR_SYNC__ === 'function') {
             get('status', { cid: cfg.cid, _: Date.now() }, function (res) {
                 inFlight = false;
 
+                if (mySeq !== pollSeq) {
+                    return;   // 过期响应
+                }
+
+                if (-1 === res.code) {
+                    stopPolling();
+                    toast(res.msg || '网络请求失败，已停止自动刷新', true);
+
+                    return;
+                }
+
                 if (0 !== res.code || !res.data) {
+                    if (403 === res.code) {
+                        stopPolling();
+                        toast('登录状态已失效，请刷新页面', true);
+                    }
+
                     return;
                 }
 
@@ -886,7 +947,23 @@
         get('batch', { cids: cids.join(','), _: Date.now() }, function (res) {
             inFlight = false;
 
+            if (mySeq !== pollSeq) {
+                return;   // 过期响应
+            }
+
+            if (-1 === res.code) {
+                stopPolling();
+                toast(res.msg || '网络请求失败，已停止自动刷新', true);
+
+                return;
+            }
+
             if (0 !== res.code || !res.data || !res.data.jobs) {
+                if (403 === res.code) {
+                    stopPolling();
+                    toast('登录状态已失效，请刷新页面', true);
+                }
+
                 return;
             }
 

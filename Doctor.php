@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.0
+ * @version 1.7.1
  */
 class TtsVoice_Doctor
 {
@@ -36,19 +36,14 @@ class TtsVoice_Doctor
     {
         $rows = array();
 
-        self::checkDir($rows);
-        self::checkPhp($rows);
+        // 只留「出问题会直接影响合成/播放」的几项
         self::checkNetwork($rows);
-        self::checkProvider($rows);
-        self::checkAccessMode($rows);
         self::checkTable($rows);
         self::checkAudioDir($rows);
-        self::checkActionUrl($rows);
         self::checkService($rows);
-        self::checkConfig($rows);
-        self::checkMount($rows);
+        self::checkQueue($rows);
+        self::checkAudioFiles($rows);
         self::checkFfmpeg($rows);
-        self::checkJobs($rows);
         self::checkVersion($rows);
 
         return $rows;
@@ -77,35 +72,6 @@ class TtsVoice_Doctor
     /* ---------------------------------------------------------- 检查项 */
 
     /**
-     * 插件目录名
-     *
-     * 目录名必须是 TtsVoice，Typecho 按「目录名_Plugin」找类，
-     * 如果是 TtsVoice-master 就会报「插件不存在」或「配置信息没有找到」。
-     */
-    protected static function checkDir(&$rows)
-    {
-        $base = basename(dirname(__FILE__));
-
-        self::row(
-            $rows,
-            '插件目录名',
-            'TtsVoice' === $base,
-            'usr/plugins/' . $base,
-            'TtsVoice' === $base ? '' : '目录名必须是 TtsVoice，请去掉 -master 后缀或多余的一层嵌套'
-        );
-    }
-
-    /**
-     * PHP 版本
-     */
-    protected static function checkPhp(&$rows)
-    {
-        $ok = version_compare(PHP_VERSION, '7.0.0', '>=');
-
-        self::row($rows, 'PHP 版本', $ok, PHP_VERSION, $ok ? '' : '需要 PHP 7.0 以上');
-    }
-
-    /**
      * 网络请求能力（curl 或 allow_url_fopen 二选一）
      */
     protected static function checkNetwork(&$rows)
@@ -119,34 +85,6 @@ class TtsVoice_Doctor
             $hasCurl || $hasFopen,
             ($hasCurl ? 'curl 可用' : 'curl 不可用') . ' ／ ' . ($hasFopen ? 'allow_url_fopen 开启' : 'allow_url_fopen 关闭'),
             ($hasCurl || $hasFopen) ? '' : '需在 php.ini 启用 curl 扩展，或打开 allow_url_fopen'
-        );
-    }
-
-    /**
-     * 当前 TTS 服务（provider）
-     *
-     * 1.6.0 新增。local / azure / openai 走不同代码路径，
-     * 排查问题时先确认「现在到底在用哪个」。
-     */
-    protected static function checkProvider(&$rows)
-    {
-        if (!class_exists('TtsVoice_Provider', false)) {
-            self::row($rows, '当前 TTS 服务', false, 'Providers.php 未加载', '缺少 usr/plugins/TtsVoice/Providers.php，请重新覆盖插件文件');
-
-            return;
-        }
-
-        $provider = TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'));
-        $endpoint = $provider->endpoint();
-
-        self::row(
-            $rows,
-            '当前 TTS 服务',
-            true,
-            $provider->label() . '（' . $provider->id() . '）'
-                . ' ／ ' . ($provider->isAsync() ? '异步任务' : '同步直出')
-                . ('' === $endpoint ? '' : ' ／ ' . $endpoint),
-            ''
         );
     }
 
@@ -208,26 +146,6 @@ class TtsVoice_Doctor
     }
 
     /**
-     * Action 接口地址（重点查 index.php 重复）
-     *
-     * 这是最容易踩的坑：Typecho 的 $options->index 在未开伪静态时
-     * 本身已含 index.php，再拼一次就会出现 index.php/index.php/...
-     */
-    protected static function checkActionUrl(&$rows)
-    {
-        $url = TtsVoice_Plugin::actionUrl('health');
-        $dup = false !== strpos($url, 'index.php/index.php');
-
-        self::row(
-            $rows,
-            'Action 接口地址',
-            !$dup,
-            $url,
-            $dup ? '出现两段 index.php —— 运行的是旧版 Plugin.php，请重新覆盖插件文件' : ''
-        );
-    }
-
-    /**
      * 服务连通性
      *
      * 统一走 provider->health()（Azure 做一次极短合成，Qwen 走 GET {base}/models），
@@ -236,13 +154,13 @@ class TtsVoice_Doctor
      */
     protected static function checkService(&$rows)
     {
-        if (!class_exists('TtsVoice_Provider', false)) {
+        if (!class_exists('TtsVoice_Provider_OpenAI', false)) {
             self::row($rows, '服务连通性', false, 'Provider 层未加载', '插件文件不完整，请重新上传 usr/plugins/TtsVoice/');
 
             return;
         }
 
-        $provider = TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'));
+        $provider = new TtsVoice_Provider_OpenAI();
         $result   = $provider->health();
         $ms       = intval($result['ms']);
         $name     = '服务连通性（' . $provider->label() . '）';
@@ -266,78 +184,6 @@ class TtsVoice_Doctor
             $result['error'] . '（' . $ms . ' ms）',
             '检查 API Key / 区域 / Endpoint / 服务地址与网络（异地需先组内网）'
         );
-    }
-
-    /**
-     * 访问模式：内网 / 公网 HTTPS
-     *
-     * 走公网时超时和证书是两个高频问题，这里提前提示。
-     */
-    protected static function checkAccessMode(&$rows)
-    {
-        // 1.6.0：不同 provider 的目标地址不同，统一从 provider->endpoint() 取
-        $provider = class_exists('TtsVoice_Provider', false)
-            ? TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'))
-            : NULL;
-
-        $url     = $provider ? (string) $provider->endpoint() : '';
-        $isHttps = 0 === stripos($url, 'https://');
-        $isLocal = (bool) preg_match('#(127\.0\.0\.1|localhost|192\.168\.|10\.\d+\.|172\.(1[6-9]|2\d|3[01])\.)#i', $url);
-        $timeout = TtsVoice_Plugin::intOpt('timeout', 15);
-
-        if ('' === $url) {
-            self::row($rows, '访问模式', false, '未配置服务地址', '到插件设置填写服务地址 / Endpoint');
-
-            return;
-        }
-
-        $mode = $isHttps ? 'HTTPS' : 'HTTP（明文）';
-        $net  = $isLocal ? '内网' : '公网';
-
-        $tips = array();
-
-        if ($isHttps && !$isLocal) {
-            $tips[] = '公网 HTTPS：确认证书有效，自签证书需在插件设置里关闭证书校验';
-        }
-
-        if (!$isLocal && $timeout < 30) {
-            $tips[] = '公网访问建议把「请求超时」调到 30 以上（当前 ' . $timeout . ' 秒）';
-        }
-
-        if (!$isHttps && !$isLocal) {
-            $tips[] = '公网用明文 HTTP，音频与密钥会被窃听，强烈建议套 HTTPS';
-        }
-
-        self::row(
-            $rows,
-            '访问模式',
-            true,
-            $mode . ' ／ ' . $net . ($provider ? ' ／ ' . $provider->id() : ''),
-            implode('；', $tips)
-        );
-    }
-
-    /**
-     * 插件配置行
-     */
-    protected static function checkConfig(&$rows)
-    {
-        $ok    = false;
-        $value = '';
-
-        try {
-            $db  = ttsv_db();
-            $row = $db->fetchRow(
-                $db->select()->from('table.options')->where('name = ?', 'plugin:TtsVoice')->limit(1)
-            );
-
-            $ok    = is_array($row) && isset($row['value']) && '' !== (string) $row['value'];
-            $value = $ok ? 'plugin:TtsVoice 已写入' : '缺失或为空（刷新任意页面会自动补写）';
-        } catch (Throwable $e) {
-            $value = '查询失败：' . $e->getMessage();
-        }
-
-        self::row($rows, '插件配置行', $ok, $value, $ok ? '' : '若反复缺失，禁用后重新启用插件');
     }
 
     /**
@@ -381,59 +227,68 @@ class TtsVoice_Doctor
     }
 
     /**
-     * 播放器挂载方式
+     * 作业队列（/jobs）—— 主链路真正用到的接口
      */
-    protected static function checkMount(&$rows)
+    protected static function checkQueue(&$rows)
     {
-        $auto = TtsVoice_Plugin::boolOpt('autoInsert', true);
+        if (!class_exists('TtsVoice_Provider_OpenAI', false)) {
+            self::row($rows, '作业队列（/jobs）', false, 'Provider 层未加载', '插件文件不完整，请重新上传 usr/plugins/TtsVoice/');
 
-        self::row(
-            $rows,
-            '播放器挂载方式',
-            true,
-            $auto
-                ? '自动插入（文章末尾，依赖主题 footer.php 里的 $this->footer()）'
-                : '手动调用（需在主题模板里写 TtsVoice_Plugin::renderPlayer()）',
-            $auto
-                ? '若播放器没出现，说明主题没调用 $this->footer()。可改为「手动调用」并在模板里加 <?php TtsVoice_Plugin::renderPlayer(); ?>，或在插件设置里填写「自动插入位置」的 DOM id'
-                : ''
-        );
+            return;
+        }
+
+        $provider = new TtsVoice_Provider_OpenAI();
+        $result   = $provider->probeQueue();
+
+        if (!empty($result['ok'])) {
+            self::row($rows, '作业队列（/jobs）', true, '可访问，当前 ' . intval($result['jobs']) . ' 个任务', '');
+        } else {
+            self::row(
+                $rows,
+                '作业队列（/jobs）',
+                false,
+                (string) $result['error'],
+                '检查「Qwen 服务端地址」是否指向接收端，以及 X-TtsVoice-Token（默认复用 Qwen 鉴权 Key）是否与主机一致'
+            );
+        }
     }
 
     /**
-     * 任务统计
+     * 音频文件完整性：ready 的任务在磁盘上是否真的有文件
      */
-    protected static function checkJobs(&$rows)
+    protected static function checkAudioFiles(&$rows)
     {
-        try {
-            $db   = ttsv_db();
-            $list = $db->fetchAll($db->select('cid', 'status')->from('table.tts_jobs'));
+        $jobs    = TtsVoice_Plugin::allJobs(500);
+        $missing = array();
 
-            $stat = array('ready' => 0, 'busy' => 0, 'failed' => 0, 'other' => 0);
-
-            foreach ((array) $list as $item) {
-                $status = isset($item['status']) ? (string) $item['status'] : '';
-
-                if ('ready' === $status) {
-                    $stat['ready']++;
-                } elseif (in_array($status, array('queued', 'running', 'done'), true)) {
-                    $stat['busy']++;
-                } elseif ('failed' === $status) {
-                    $stat['failed']++;
-                } else {
-                    $stat['other']++;
-                }
+        foreach ($jobs as $job) {
+            if ('ready' !== $job['status'] || '' === $job['audio']) {
+                continue;
             }
 
-            $value = '共 ' . count($list) . ' 条：已就绪 ' . $stat['ready']
-                . '，进行中 ' . $stat['busy']
-                . '，失败 ' . $stat['failed'];
+            $abs = rtrim(__TYPECHO_ROOT_DIR__, '/') . '/' . ltrim($job['audio'], '/');
 
-            self::row($rows, '任务统计', true, $value, '');
-        } catch (Throwable $e) {
-            self::row($rows, '任务统计', false, '查询失败：' . $e->getMessage(), '');
+            if (!is_file($abs)) {
+                $missing[] = '#' . $job['cid'];
+            }
         }
+
+        if (empty($missing)) {
+            self::row($rows, '音频文件完整性', true, 'ready 的任务都有对应文件', '');
+
+            return;
+        }
+
+        self::row(
+            $rows,
+            '音频文件完整性',
+            false,
+            count($missing) . ' 条 ready 任务找不到音频文件：' . implode('、', array_slice($missing, 0, 8))
+                . (count($missing) > 8 ? '…' : ''),
+            '这些文章不会显示播放器；在面板里对它们重新生成，或删掉记录'
+        );
     }
+
 
     /**
      * 版本号

@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.0
+ * @version 1.7.1
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
@@ -197,8 +197,8 @@ if ('doctor' === $panelAction) {
             <span class="ttsv-head-item">
                 <?php
                 // 1.6.0：显示当前 TTS 服务与目标地址
-                $ttsvProvider = class_exists('TtsVoice_Provider', false)
-                    ? TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'))
+                $ttsvProvider = class_exists('TtsVoice_Provider_OpenAI', false)
+                    ? new TtsVoice_Provider_OpenAI()
                     : NULL;
                 $ttsvEndpoint = $ttsvProvider ? $ttsvProvider->endpoint() : '';
                 ?>
@@ -265,10 +265,8 @@ if ('doctor' === $panelAction) {
 
                         <?php
                         // 插件只有克隆一条路：模型恒为 1.7B-Base，音色只来自上面的样本。
-                        $ttsvIsQwen = ('openai' === (string) TtsVoice_Plugin::opt('provider', 'openai'))
-                            && ('qwen3tts' === strtolower(trim((string) TtsVoice_Plugin::opt('openaiFlavor', 'qwen3tts'))));
-
-                        if ($ttsvIsQwen) {
+                        // 只有一条路：Qwen3-TTS 克隆
+                        if (true) {
                             $ttsvCloneModel = TtsVoice_Plugin::cloneModelName();
                             ?>
                             <p style="margin:0 0 10px;font-size:13px;color:#555">
@@ -734,9 +732,10 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
 
     if (doctorBtn) {
         doctorBtn.addEventListener('click', function () {
-            window.location.href = '<?php echo ttsv_esc(
-                $options->adminUrl . 'extending.php?panel=TtsVoice/panel.php&action=doctor'
-            ); ?>';
+            window.location.href = <?php echo json_encode(
+                $options->adminUrl . 'extending.php?panel=TtsVoice/panel.php&action=doctor',
+                JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP
+            ); ?>;
         });
     }
 
@@ -944,25 +943,48 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
             regenBtn.disabled = true;
 
             var index = 0;
+            var okCount = 0;
+            var failed = [];
+
+            function finish() {
+                // 无论成功失败都必须解锁，否则只能刷新页面才能再点
+                regenBtn.disabled = false;
+
+                if (failed.length) {
+                    voiceMsg('已提交 ' + okCount + ' 篇，失败 ' + failed.length + ' 篇'
+                        + '（' + failed.slice(0, 3).join('、') + (failed.length > 3 ? '…' : '') + '）');
+                    toast('有 ' + failed.length + ' 篇提交失败：' + failed[0], true);
+                } else {
+                    voiceMsg('已全部提交（' + okCount + ' 篇），进度会自动刷新');
+                    toast('已提交 ' + okCount + ' 篇重生成', false);
+                }
+
+                /*
+                 * 这里**不再整页刷新**：提交完这些行已经是 queued，
+                 * 上面的 3 秒轮询会把进度、时长、大小一并刷出来。
+                 * 刷新整页只会把用户刚看到的列表重建一遍，还会丢掉滚动位置。
+                 */
+                ttsvTick();
+            }
 
             function next() {
                 if (index >= cids.length) {
-                    voiceMsg('已全部提交（' + cids.length + ' 篇），进度会自动刷新');
-                    toast('已提交 ' + cids.length + ' 篇重生成', false);
-
-                    /*
-                     * 这里**不再整页刷新**：提交完这些行已经是 queued，
-                     * 上面的 3 秒轮询会把进度、时长、大小一并刷出来。
-                     * 刷新整页只会把用户刚看到的列表重建一遍，还会丢掉滚动位置。
-                     */
-                    ttsvTick();
+                    finish();
                     return;
                 }
 
                 var cid = cids[index++];
 
                 request('POST', 'submit', { cid: cid }, function (res) {
-                    // 立刻标成排队中，否则轮询只挑「进行中」的行，这些行会被漏掉
+                    if (!res || 0 !== res.code) {
+                        // 失败不标「排队中」，否则轮询会一直等一个不存在的任务
+                        failed.push('#' + cid + (res && res.msg ? '：' + res.msg : ''));
+                        next();
+                        return;
+                    }
+
+                    okCount++;
+
                     var r = document.getElementById('ttsv-row-' + cid);
 
                     if (r) {
@@ -972,8 +994,7 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
                     delete pollSeen[cid];
                     delete noticeSeen[cid];
 
-                    voiceMsg('已提交 ' + index + '/' + cids.length
-                        + ((res && res.msg) ? '（' + res.msg + '）' : ''));
+                    voiceMsg('已提交 ' + index + '/' + cids.length);
                     next();
                 });
             }
@@ -1165,19 +1186,30 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
         if (playCell) {
             var hasBtn = !!playCell.querySelector('button.ttsv-play-tri');
 
-            if ('ready' === st && job.audioUrl && !hasBtn) {
-                var b = document.createElement('button');
+            if ('ready' === st && job.audioUrl) {
+                var b = playCell.querySelector('button.ttsv-play-tri');
 
-                b.type = 'button';
-                b.className = 'ttsv-play-tri';
-                b.setAttribute('data-act', 'play');
+                if (!b) {
+                    b = document.createElement('button');
+                    b.type = 'button';
+                    b.className = 'ttsv-play-tri';
+                    b.setAttribute('data-act', 'play');
+                    b.setAttribute('aria-label', '播放');
+                    b.setAttribute('title', '播放');
+                }
+
                 b.setAttribute('data-cid', String(cid));
-                b.setAttribute('data-audio', job.audioUrl);
                 b.setAttribute('data-title', job.title || '');
-                b.setAttribute('title', '播放');
-                b.setAttribute('aria-label', '播放');
-                playCell.innerHTML = '';
-                playCell.appendChild(b);
+
+                // URL 变了（重新生成 / 换了格式）才写，并在播放中时先停掉
+                if (b.getAttribute('data-audio') !== job.audioUrl) {
+                    b.setAttribute('data-audio', job.audioUrl);
+                }
+
+                if (!b.parentNode) {
+                    playCell.innerHTML = '';
+                    playCell.appendChild(b);
+                }
             } else if ('ready' !== st && '' === (job.audioUrl || '') && hasBtn) {
                 // 被删掉/重生成 → 熄灭
                 playCell.innerHTML = '<span class="ttsv-play-tri is-off" title="暂无音频" aria-label="暂无音频"></span>';

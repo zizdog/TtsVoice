@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.0
+ * @version 1.7.1
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.7.0';
+        const VERSION = '1.7.1';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -236,24 +236,6 @@ namespace {
         }
 
         /**
-         * 服务商下拉选项（id => label）
-         *
-         * @return array
-         */
-        protected static function providerOptions()
-        {
-            if (class_exists('TtsVoice_Provider', false)) {
-                return TtsVoice_Provider::all();
-            }
-
-            // Providers.php 未加载时的兜底（理论上不会发生）
-            return array(
-                'openai' => _t('自建 Qwen3-TTS（推荐）'),
-                'azure'  => _t('微软 Azure 语音'),
-            );
-        }
-
-        /**
          * 解析任意 HTML 布局块类名（兼容 1.2 下划线与 1.3 命名空间）
          *
          * @return string 找不到时返回空串
@@ -270,32 +252,19 @@ namespace {
         }
 
         /**
-         * 「按服务商显隐 + 高级区折叠」的内联脚本
+         * 「高级设置」折叠脚本
          *
-         * Typecho 的 Form 没有条件显示 / 折叠能力，所以在表单末尾追加一个 Layout 块，
-         * 用一小段原生 JS 做两件事：
-         *   1. 按 provider 的当前值显示/隐藏各自的 <ul class="typecho-option"> 行；
-         *   2. 把「音色样本 / 输出格式 / 语速」搬进一个**默认收起**的 <details>（高级设置）。
+         * Typecho 的 Form 没有条件显示 / 折叠能力，所以追加一个 Layout 块，
+         * 用一小段原生 JS 把「音色样本 / 输出格式 / 语速」搬进默认收起的 <details>。
          * markup 变化时静默失败，不影响保存。
+         *
+         * 【必须幂等】脚本会执行两次（解析时 + DOMContentLoaded），
+         * 不做判断就会把已有 <details> 再套一层（历史上出现过「双层高级设置」）。
          *
          * @return string
          */
-        protected static function providerScript()
+        protected static function advancedScript()
         {
-            $azure  = json_encode(
-                array('azureKey', 'azureRegion', 'azureEndpoint', 'azureVoice', 'azureStyle', 'azureRate', 'azurePitch', 'azureFormat'),
-                JSON_UNESCAPED_SLASHES
-            );
-            // 注意：refText / openaiFormat / openaiSpeed 虽然被收进「高级」，
-            // 但它们仍然只属于自建 Qwen3-TTS，所以照样列在 openai 组里参与显隐。
-            $openai = json_encode(
-                array(
-                    'openaiBaseUrl', 'openaiKey',
-                    'refText', 'openaiFormat', 'openaiSpeed',
-                    'refAudioPath', 'refUploadUrlOverride', 'refUploadTokenOverride',
-                ),
-                JSON_UNESCAPED_SLASHES
-            );
             $adv = json_encode(array('refText', 'openaiFormat', 'openaiSpeed'), JSON_UNESCAPED_SLASHES);
 
             return '<style>'
@@ -308,7 +277,6 @@ namespace {
                 . '</style>'
                 . '<script>'
                 . '(function(){'
-                . 'var G={"azure":' . $azure . ',"openai":' . $openai . '};'
                 . 'var ADV=' . $adv . ';'
                 . 'function row(n){'
                 . 'var el=document.querySelector(\'[name="\'+n+\'"]\');'
@@ -321,17 +289,7 @@ namespace {
                 . '}'
                 . 'return null;'
                 . '}'
-                . 'function picked(){'
-                . 'var all=document.querySelectorAll(\'[name="provider"]\');'
-                . 'if(!all||!all.length){return "openai";}'
-                . 'if(all[0].tagName==="SELECT"){return all[0].value||"openai";}'
-                . 'for(var i=0;i<all.length;i++){if(all[i].checked){return all[i].value;}}'
-                . 'return "openai";'
-                . '}'
-                // 把「音色样本 / 输出格式 / 语速」搬进默认收起的 <details>
                 . 'function buildAdv(){'
-                // 【必须幂等】这段脚本会执行两次（解析时 + DOMContentLoaded），
-                // 不做判断就会把已有 <details> 再套一层（实测出现「双层高级设置」）。
                 . 'if(document.querySelector(".ttsv-adv")){return;}'
                 . 'var vp=document.getElementById("ttsv-vp");'
                 . 'var first=row(ADV[0]);'
@@ -349,42 +307,10 @@ namespace {
                 . 'host.insertBefore(d,anchor);'
                 . 'if(vp){body.appendChild(vp);}'
                 . 'for(var i=0;i<ADV.length;i++){var r=row(ADV[i]);if(r){body.appendChild(r);}}'
-                . 'window.__ttsvAdv=d;'
-                . '}'
-                . 'function apply(){'
-                // 「字段 -> 所属服务数组」反查表：用「或」语义，避免同属多服务时互相覆盖。
-                . 'var O={};'
-                . 'for(var pid in G){'
-                . 'if(!Object.prototype.hasOwnProperty.call(G,pid)){continue;}'
-                . 'for(var i=0;i<G[pid].length;i++){'
-                . 'var f=G[pid][i];'
-                . 'if(!O[f]){O[f]=[];}'
-                . 'O[f].push(pid);'
-                . '}'
-                . '}'
-                . 'var sel=picked();'
-                . 'for(var name in O){'
-                . 'if(!Object.prototype.hasOwnProperty.call(O,name)){continue;}'
-                . 'var li=row(name);'
-                . 'if(!li){continue;}'
-                . 'li.style.display=(O[name].indexOf(sel)>=0)?"":"none";'
-                . '}'
-                // 音色样本块（Layout 渲染，不是 typecho-option 行）只在自建 Qwen3-TTS 下显示
-                . 'var showRef=(sel==="openai");'
-                . 'var vp=document.getElementById("ttsv-vp");'
-                . 'if(vp){vp.style.display=showRef?"":"none";}'
-                // 「高级」整块：非 Qwen 服务时藏掉（里面全是 Qwen 的东西）
-                . 'var advBox=window.__ttsvAdv;'
-                . 'if(advBox){advBox.style.display=showRef?"":"none";}'
                 . '}'
                 . 'buildAdv();'
-                . 'apply();'
-                . 'var nodes=document.querySelectorAll(\'[name="provider"]\');'
-                . 'for(var i=0;i<nodes.length;i++){'
-                . 'nodes[i].addEventListener("change",apply);'
-                . '}'
                 . 'if(document.readyState==="loading"){'
-                . 'document.addEventListener("DOMContentLoaded",function(){buildAdv();apply();});'
+                . 'document.addEventListener("DOMContentLoaded",buildAdv);'
                 . '}'
                 . '})();'
                 . '</script>';
@@ -425,16 +351,6 @@ namespace {
             // ★ 返回值是裁剪之前的键名，下面补隐藏输入时要用（不能读库，库已被清干净）。
             $storedKeysBeforePrune = self::pruneStoredConfig();
 
-            // 【自愈】老站点可能还存着已下线的服务商（如 1.6.7 的 local/tts-worker）→ 回落到默认
-            $storedProvider = trim((string) self::opt('provider', 'openai'));
-            if (!isset(self::providerOptions()[$storedProvider])) {
-                try {
-                    self::saveSettings(array('provider' => 'openai'));
-                } catch (Throwable $e) {
-                    // 存不进去也不影响渲染
-                }
-            }
-
             /*
              * 【自愈】分块方式的默认值 1.6.8 起由「按段落」改为「按字数」。
              * 老站点库里若还停在旧默认（paragraph），这里跟着换过来。
@@ -458,27 +374,11 @@ namespace {
                 }
             }
 
-            if (!isset(self::providerOptions()[$storedProvider])) {
-                $liveFix['provider'] = 'openai';
-            }
-
-            // 上面两次自愈只写了库；核心渲染时用的是**请求开始时加载的** options 单例，
-            // 不把内存里的那份一起改掉，用户第一次打开设置页会看到旧值（甚至没有选中项）。
+            // 自愈只写了库；核心渲染时用的是**请求开始时加载的** options 单例，
+            // 不把内存里的那份一起改掉，用户第一次打开设置页会看到旧值。
             self::patchLiveConfig($liveFix);
 
-            // ---- ① TTS 服务 ----
-            $clsRadio = self::elementClass('Radio');
-            $provider = new $clsRadio(
-                'provider',
-                self::providerOptions(),
-                'openai',
-                _t('TTS 服务'),
-                _t('用谁来合成音频。<b>Qwen3-TTS</b>：自建，用音色样本克隆音色（服务端有默认音色，不上传也能用）。'
-                    . '<b>Azure</b>：云端，填 Key 即用，只能用自带音色。')
-            );
-            $form->addInput($provider);
-
-            // ---- ② 自建 Qwen3-TTS：服务端地址与 Key（放最上面，填完就能用）----
+            // ---- ① Qwen 服务端地址与 Key（放最上面，填完就能用）----
             $clsText = self::elementClass('Text');
             $openaiBase = new $clsText(
                 'openaiBaseUrl',
@@ -501,7 +401,7 @@ namespace {
             );
             $form->addInput($openaiKey);
 
-            // ---- ③ 分块方式（所有服务商都生效；默认按字数）----
+            // ---- ② 分块方式（所有服务商都生效；默认按字数）----
             $clsRadio = self::elementClass('Radio');
             $chunkMode = new $clsRadio(
                 'chunkMode',
@@ -516,7 +416,7 @@ namespace {
             );
             $form->addInput($chunkMode);
 
-            // ---- ④ 分块长度 ----
+            // ---- ③ 分块长度 ----
             $clsText = self::elementClass('Text');
             $chunk = new $clsText(
                 'chunkChars',
@@ -527,88 +427,7 @@ namespace {
             );
             $form->addInput($chunk);
 
-            // ---- ⑤ 微软 Azure 语音 ----
-            $clsText = self::elementClass('Text');
-            $azureKey = new $clsText(
-                'azureKey',
-                NULL,
-                '',
-                _t('Azure 订阅密钥'),
-                _t('Azure「语音服务」资源的密钥（KEY 1 或 KEY 2）。只存在服务器端，不会输出到前端。')
-            );
-            $form->addInput($azureKey);
-
-            $clsText = self::elementClass('Text');
-            $azureRegion = new $clsText(
-                'azureRegion',
-                NULL,
-                'eastasia',
-                _t('Azure 区域'),
-                _t('资源所在区域，如 <code>eastasia</code>、<code>eastus</code>；留空 Endpoint 时用它拼服务地址。')
-            );
-            $form->addInput($azureRegion);
-
-            $clsText = self::elementClass('Text');
-            $azureEndpoint = new $clsText(
-                'azureEndpoint',
-                NULL,
-                '',
-                _t('Azure Endpoint（可选）'),
-                _t('只有自定义域名 / 私有终结点 / 本地 mock 才填，结尾不要带 <code>/</code>。')
-            );
-            $form->addInput($azureEndpoint);
-
-            $clsText = self::elementClass('Text');
-            $azureVoice = new $clsText(
-                'azureVoice',
-                NULL,
-                'zh-CN-XiaoxiaoNeural',
-                _t('Azure 音色'),
-                _t('完整音色名，如 <code>zh-CN-XiaoxiaoNeural</code>（晓晓）、<code>zh-CN-YunxiNeural</code>（云希）。')
-            );
-            $form->addInput($azureVoice);
-
-            $clsText = self::elementClass('Text');
-            $azureStyle = new $clsText(
-                'azureStyle',
-                NULL,
-                '',
-                _t('Azure 说话风格（可选）'),
-                _t('如 <code>newscast</code>、<code>cheerful</code>；并非所有音色都支持，填错会报错。')
-            );
-            $form->addInput($azureStyle);
-
-            $clsText = self::elementClass('Text');
-            $azureRate = new $clsText(
-                'azureRate',
-                NULL,
-                '0%',
-                _t('Azure 语速'),
-                _t('SSML <code>rate</code>，如 <code>0%</code>、<code>-10%</code>、<code>+20%</code>。')
-            );
-            $form->addInput($azureRate);
-
-            $clsText = self::elementClass('Text');
-            $azurePitch = new $clsText(
-                'azurePitch',
-                NULL,
-                '0%',
-                _t('Azure 音调'),
-                _t('SSML <code>pitch</code>，如 <code>0%</code>、<code>-5%</code>。')
-            );
-            $form->addInput($azurePitch);
-
-            $clsText = self::elementClass('Text');
-            $azureFormat = new $clsText(
-                'azureFormat',
-                NULL,
-                'audio-24khz-48kbitrate-mono-mp3',
-                _t('Azure 输出格式'),
-                _t('对应请求头 <code>X-Microsoft-OutputFormat</code>，默认 24kHz mp3。')
-            );
-            $form->addInput($azureFormat);
-
-            // ---- ⑦ 通用设置（分隔线）----
+            // ---- ④ 通用设置（分隔线）----
             $sepLayout = self::layoutClass();
 
             if ('' !== $sepLayout) {
@@ -714,8 +533,8 @@ namespace {
             );
             $form->addInput($keep);
 
-            // ---- ⑧ 高级设置（默认折叠：音色样本 / 输出格式 / 语速）----
-            // 这里只放控件；折叠由 providerScript() 里那段 JS 把它们搬进 <details>。
+            // ---- ④ 高级设置（默认折叠：音色样本 / 输出格式 / 语速）----
+            // 这里只放控件；折叠由 advancedScript() 里那段 JS 把它们搬进 <details>。
             $voiceLayout = self::layoutClass();
 
             if ('' !== $voiceLayout) {
@@ -760,7 +579,7 @@ namespace {
             );
             $form->addInput($openaiSpeed);
 
-            // ---- ⑨ 无界面但必须占位的配置键 ----
+            // ---- ⑤ 无界面但必须占位的配置键 ----
             // 这些键在库里存在（或被上传流程写入），但没有可见控件；
             // 必须给它们一个 Hidden 输入，否则核心的 getInput($key)->value() 会 fatal。
             $clsHidden = self::elementClass('Hidden');
@@ -777,7 +596,7 @@ namespace {
                 }
             }
 
-            // ---- ⑩ 通用兜底：库里任何没有对应控件的键，都补一个隐藏输入 ----
+            // ---- ⑥ 通用兜底：库里任何没有对应控件的键，都补一个隐藏输入 ----
             // 触发场景很现实：某个版本删掉了配置项，老站点库里还留着旧键 ——
             // 核心会对它做 getInput()->value() 而 fatal。pruneStoredConfig() 要到下一次
             // 请求才在内存生效，所以首次加载仍需这里兜住。
@@ -796,13 +615,13 @@ namespace {
                 // 兜底失败也不能影响表单渲染
             }
 
-            // ---- ⑪ 条件显示（按服务商显隐）+ 高级区折叠 ----
+            // ---- ⑦ 高级区折叠 ----
             $layout = self::layoutClass();
 
             if ('' !== $layout) {
                 try {
                     $item = new $layout();
-                    $item->html(self::providerScript());
+                    $item->html(self::advancedScript());
                     $form->addItem($item);
                 } catch (Throwable $e) {
                     // 布局类不可用时忽略，不影响保存
@@ -1065,8 +884,6 @@ namespace {
         public static function defaults()
         {
             return array(
-                // 服务商（1.6.0）
-                'provider'     => 'openai',
                 // 分块方式：chars(按字数，默认) | paragraph(按段落/标题)
                 'chunkMode'    => 'chars',
                 // 一次性迁移标记：1.6.8 把默认从 paragraph 改成 chars 后，
@@ -1076,44 +893,20 @@ namespace {
                 // 落在 nginx 默认的 60 秒 FastCGI 超时内，否则会被网关掐断。
                 'chunkChars'   => '120',
 
-                // Azure
-                'azureKey'      => '',
-                'azureRegion'   => 'eastasia',
-                'azureEndpoint' => '',
-                'azureVoice'    => 'zh-CN-XiaoxiaoNeural',
-                'azureStyle'    => '',
-                'azureRate'     => '0%',
-                'azurePitch'    => '0%',
-                'azureFormat'   => 'audio-24khz-48kbitrate-mono-mp3',
-
                 // 自建 Qwen3-TTS（OpenAI 兼容协议）
                 'openaiBaseUrl' => 'http://127.0.0.1:8894/v1',
                 'openaiKey'     => '',
-                // 【已从设置页去掉】改名后不再由用户选：服务类型固定 qwen3tts；
-                // openaiModel / openaiCloneModel 作为隐藏键保留默认值（由「音色」决定用哪个）。
-                'openaiModel'   => 'gpt-4o-mini-tts',
-                'openaiFlavor'  => 'qwen3tts',
                 // 【只有克隆一条路】模型固定为 1.7B-Base（支持 ref_audio 克隆）。
                 // 预置音色（CustomVoice）已整体下线：openaiPresetModel / openaiVoice
                 // 两个键也从配置里删掉了，音色的唯一来源是「音色样本」。
-                // 留空则退回旧键 openaiModel。
                 'openaiCloneModel'  => 'mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit',
-                // 【默认 wav】同一段音频的对照试听里，24kHz 单声道 WAV 明显好过
-                // 128k / 192k / VBR0 的 mp3（mp3 的编码噪声被听成了「破音」）。
-                // 代价是文件大（≈48 KB/s），由「输出格式」可随时切回 mp3。
-                'openaiFormat'  => 'wav',
+                // 【默认 mp3】长音频（30~60 分钟）用 wav 会到 100MB+/篇，磁盘吃不消；
+                // 24kHz 单声道 mp3（128k）对朗读足够，体积约 1/3。想要无损可在设置里改 wav。
+                'openaiFormat'  => 'mp3',
                 // 【语速 = 本地变速倍率】上游 mlx-audio 的 speed 参数目前是空实现
                 // （传了不生效），所以这里改成下载后本地 ffmpeg atempo 变速（不改音高）。
                 // 1.0 = 原速，1.25 = 快 25%。
                 'openaiSpeed'   => '1.25',
-                // 【采样参数】反复对照试出来的「不退化」组合：
-                // 上游 server 默认给 temperature=0.7 / top_p=0.95 / top_k=40，但把
-                // repetition_penalty 压成 1.0，长句会整段退化成噪声；
-                // 显式补上 rp=1.05 后 1/4 → 4/4 正常。详见 SPEC-TO-MINI-job-queue.md §14。
-                'openaiTemperature' => '0.7',
-                'openaiTopP'        => '0.9',
-                'openaiTopK'        => '40',
-                'openaiRepPenalty'  => '1.05',
                 // 音色克隆：参考音频在 TTS 主机上的路径（留空 = 用本机路径）
                 'refAudioPath'  => '',
                 // 参考音频里实际说了什么（填了走 ICL，更像）
@@ -2181,7 +1974,7 @@ namespace {
          * 克隆（Base）模型名
          *
          * 设置页不暴露这个选项（插件只有克隆一条路），键留在库里，这里读它；
-         * 键为空时退回旧键 openaiModel，再退回内置默认名。
+         * 键为空时退回内置默认名。
          *
          * @return string
          */
@@ -2193,9 +1986,7 @@ namespace {
                 return $model;
             }
 
-            $legacy = trim((string) self::opt('openaiModel', ''));
-
-            return '' === $legacy ? 'mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit' : $legacy;
+            return 'mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit';
         }
 
         /**
@@ -3991,11 +3782,17 @@ namespace {
             //     max-width 会被限制成 30px，几个字也会被折成好几行。
             echo '<div class="ttsv-editor-line">';
 
+            // 新文章还没有 cid：按钮置灰，点了也没意义（以前是可见可点但无反应）
+            $cidDisabled = $cid > 0 ? '' : ' disabled';
+
             echo '<button type="button" class="ttsv-ibtn ttsv-ibtn-gen" id="ttsv-generate" data-cid="' . $cid . '"'
-                . ' data-tip="生成朗读音频" aria-label="生成朗读音频">'
+                . $cidDisabled
+                . ' data-tip="' . ($cid > 0 ? '生成朗读音频' : '先保存文章后才能生成') . '"'
+                . ' aria-label="生成朗读音频"' . ($cid > 0 ? '' : ' title="先保存文章后才能生成"') . '>'
                 . '<span class="ttsv-tip">生成朗读音频</span></button>';
 
             echo '<button type="button" class="ttsv-ibtn ttsv-ibtn-del" id="ttsv-remove" data-cid="' . $cid . '"'
+                . $cidDisabled
                 . ' data-tip="删除音频" aria-label="删除音频">'
                 . '<span class="ttsv-tip">删除音频</span></button>';
 

@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.0
+ * @version 1.7.1
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -194,49 +194,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /* ============================================================== */
-        /* 工厂                                                            */
-        /* ============================================================== */
-
-        /**
-         * 按标识创建服务商
-         *
-         * @param string $id
-         * @return TtsVoice_Provider
-         */
-        public static function make($id)
-        {
-            $id = strtolower(trim((string) $id));
-
-            $map = array(
-                'azure'  => 'TtsVoice_Provider_Azure',
-                'openai' => 'TtsVoice_Provider_OpenAI',
-            );
-
-            if (isset($map[$id]) && class_exists($map[$id], false)) {
-                return new $map[$id]();
-            }
-
-            // 1.6.8 起 tts-worker(local) 已彻底移除：未知/历史服务商一律回落到 Qwen3-TTS
-            // （老站点库里可能还存着 'local'，设置页保存后会被自愈成 'openai'）
-            return new TtsVoice_Provider_OpenAI();
-        }
-
-        /**
-         * 配置下拉用：id => label
-         *
-         * 顺序就是界面上的顺序：**自建 Qwen3-TTS 放第一个**（默认，主力方案），Azure 第二。
-         *
-         * @return array
-         */
-        public static function all()
-        {
-            return array(
-                'openai' => _t('自建 Qwen3-TTS（推荐）'),
-                'azure'  => _t('微软 Azure 语音'),
-            );
-        }
-
-        /* ============================================================== */
         /* 公共工具                                                        */
         /* ============================================================== */
 
@@ -260,16 +217,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
         protected function timeout()
         {
             return max(5, TtsVoice_Plugin::intOpt('timeout', 15));
-        }
-
-        /**
-         * 同步型合成的超时：一次请求里要等整块音频生成，按配置倍数放大
-         *
-         * @return int
-         */
-        protected function syncTimeout()
-        {
-            return max(30, $this->timeout() * 4);
         }
 
         /**
@@ -378,6 +325,8 @@ if (!class_exists('TtsVoice_Provider', false)) {
                     CURLOPT_TIMEOUT        => max(1, intval($timeout)),
                     CURLOPT_CONNECTTIMEOUT => max(1, intval($connectTimeout)),
                     CURLOPT_FOLLOWLOCATION => false,
+                    CURLOPT_PROTOCOLS      => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+                    CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
                     CURLOPT_HTTPHEADER     => $headers,
                     CURLOPT_USERAGENT      => 'TtsVoice',
                     CURLOPT_CUSTOMREQUEST  => $method,
@@ -421,11 +370,16 @@ if (!class_exists('TtsVoice_Provider', false)) {
             } elseif (ini_get('allow_url_fopen')) {
                 $context = stream_context_create(array(
                     'http' => array(
-                        'method'        => $method,
-                        'header'        => implode("\r\n", $headers),
-                        'content'       => NULL === $payload ? '' : $payload,
-                        'timeout'       => max(1, intval($timeout)),
-                        'ignore_errors' => true,
+                        'method'         => $method,
+                        'header'         => implode("\r\n", $headers),
+                        'content'        => NULL === $payload ? '' : $payload,
+                        'timeout'        => max(1, intval($timeout)),
+                        'ignore_errors'  => true,
+                        // 【安全】绝不跟随重定向：curl 分支早就关掉了 FOLLOWLOCATION，
+                        // 但 fopen 分支默认会跟 20 跳，并把 X-TtsVoice-Token /
+                        // Ocp-Apim-Subscription-Key 一起带到目标主机（实测过）。
+                        'follow_location' => 0,
+                        'max_redirects'   => 1,
                     ),
                     'ssl' => array(
                         'verify_peer'       => $verify,
@@ -437,10 +391,16 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 $raw = @file_get_contents($url, false, $context);
 
                 if (false === $raw) {
-                    $err = '请求失败';
-                } elseif (isset($http_response_header) && is_array($http_response_header) && !empty($http_response_header[0])) {
-                    if (preg_match('/\s(\d{3})\s/', $http_response_header[0], $m)) {
-                        $code = (int) $m[1];
+                    $last = error_get_last();
+                    $err  = (is_array($last) && !empty($last['message']))
+                        ? '请求失败：' . $last['message']
+                        : '请求失败';
+                } elseif (isset($http_response_header) && is_array($http_response_header)) {
+                    // 取最后一个 HTTP/ 行的状态码：`HTTP/2 200` 这种没有 reason-phrase 的也能解析
+                    foreach ($http_response_header as $line) {
+                        if (0 === stripos($line, 'HTTP/') && preg_match('#^HTTP/\S+\s+(\d{3})#i', $line, $m)) {
+                            $code = (int) $m[1];
+                        }
                     }
 
                     foreach ($http_response_header as $line) {
@@ -998,109 +958,17 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /**
-         * 拼接分块音频
+         * 把若干段音频拼成一个字节串
          *
-         * mp3：逐块剥掉 ID3 后首尾相接即可（stripId3 已保证入库的块是裸流）。
-         * wav：每块都是一份完整的 RIFF 文件（自带 44 字节头），直接 implode
-         *      会在流中间插入非法头，播放器放到第一块结束就停 —— 所以这里
-         *      只取各块的 PCM，再用第一块的 fmt 重新封一个头。
-         *
-         * 不假设采样率/位深：fmt 子块原样复制，只改长度字段。
+         * 只保留队列路径后，一次 writeAudio() 拿到的是「整段音频」，
+         * 不会再出现多块拼接；原来的 wavPcm/wavFile 合并逻辑已删除。
          *
          * @param array $pieces
          * @return string
          */
         protected function mergePieces(array $pieces)
         {
-            if (count($pieces) <= 1) {
-                return implode('', $pieces);
-            }
-
-            $fmt = '';
-            $pcm = '';
-
-            foreach ($pieces as $piece) {
-                $part = $this->wavPcm($piece);
-
-                if (NULL === $part) {
-                    // 有一块不是 wav（混了格式）→ 退回裸拼，至少不丢数据
-                    return implode('', $pieces);
-                }
-
-                if ('' === $fmt) {
-                    $fmt = $part['fmt'];
-                }
-
-                $pcm .= $part['pcm'];
-            }
-
-            if ('' === $fmt || '' === $pcm) {
-                return implode('', $pieces);
-            }
-
-            return $this->wavFile($fmt, $pcm);
-        }
-
-        /**
-         * 从一个 RIFF/WAVE 文件里取出 fmt 子块与 PCM 数据
-         *
-         * @param string $data
-         * @return array|null {fmt:string, pcm:string}
-         */
-        protected function wavPcm($data)
-        {
-            $data = (string) $data;
-            $len  = strlen($data);
-
-            if ($len < 12 || 'RIFF' !== substr($data, 0, 4) || 'WAVE' !== substr($data, 8, 4)) {
-                return NULL;
-            }
-
-            $offset = 12;
-            $fmt    = '';
-            $pcm    = '';
-
-            while ($offset + 8 <= $len) {
-                $id  = substr($data, $offset, 4);
-                $size = unpack('V', substr($data, $offset + 4, 4));
-                $size = intval($size[1]);
-
-                $body = substr($data, $offset + 8, $size);
-
-                if ('fmt ' === $id && '' === $fmt) {
-                    $fmt = $body;
-                } elseif ('data' === $id) {
-                    $pcm .= $body;
-                }
-
-                // 子块按偶数字节对齐
-                $offset += 8 + $size + ($size % 2);
-            }
-
-            if ('' === $fmt || '' === $pcm) {
-                return NULL;
-            }
-
-            return array('fmt' => $fmt, 'pcm' => $pcm);
-        }
-
-        /**
-         * 按 fmt 子块重新封装一份 RIFF/WAVE
-         *
-         * @param string $fmt
-         * @param string $pcm
-         * @return string
-         */
-        protected function wavFile($fmt, $pcm)
-        {
-            $fmt = (string) $fmt;
-            $pcm = (string) $pcm;
-
-            $body = 'WAVE'
-                . 'fmt ' . pack('V', strlen($fmt)) . $fmt . ((strlen($fmt) % 2) ? "\x00" : '')
-                . 'data' . pack('V', strlen($pcm)) . $pcm;
-
-            return 'RIFF' . pack('V', strlen($body)) . $body;
+            return implode('', $pieces);
         }
 
         /**
@@ -1180,458 +1048,12 @@ if (!class_exists('TtsVoice_Provider', false)) {
             return 'mp3';
         }
 
-        /**
-         * 合成一块：退化检测 + 自动重试
-         *
-         * 【为什么会退化】模型有个确定性的失败模式：一直生成静音 token 直到把
-         * max_tokens 用尽。随机采样只是**有时能逃出来**（实测约 2/3），
-         * 所以重试是有效的；而 temperature=0（贪心解码）每次都会掉进去，绝不能设。
-         *
-         * 【判据为什么可靠】退化输出的时长**正好**等于 max_tokens × 0.08 秒
-         * （12.5 token/秒），不是「超过某个经验值」，而是撞到硬上限 —— 几乎不会误判。
-         *
-         * 【2026-10-28 从 OpenAI 子类上移，修 Azure 必崩】
-         * 这个方法原来只定义在 TtsVoice_Provider_OpenAI 里，但 Azure 的
-         * synthesizeAll() 一直在调 `$this->synthesizeChunk()` —— 于是只要把
-         * 「TTS 服务」切到 Azure，点生成就是
-         * `Error: Call to undefined method TtsVoice_Provider_Azure::synthesizeChunk()`（HTTP 500），
-         * 而 Doctor 的 Azure 自检走的是 health() → synthesize()，照样显示绿。
-         * 两个服务商都需要的逻辑，放基类才对。
-         *
-         * @param string $text
-         * @return array {ok, error, audio(已去 ID3), seconds, attempts, degenerate}
-         */
-        protected function synthesizeChunk($text)
-        {
-            // 与提交给 TTS 主机队列的 max_tokens 用同一个公式（maxTokensFor）
-            $maxTokens  = $this->maxTokensFor($text);
-            $capSeconds = $maxTokens * self::SECONDS_PER_TOKEN;
-            $kbps = $this->bitrateKbps($this->outputFormatForBitrate(), 128);
-
-            $lastError = '';
-            $attempt = 0;
-
-            while ($attempt < self::SYNTH_ATTEMPTS) {
-                $attempt++;
-
-                $result = $this->synthesize($text, $maxTokens);
-
-                if (empty($result['ok'])) {
-                    $lastError = isset($result['error']) ? (string) $result['error'] : '未知错误';
-
-                    // 鉴权/配置类错误重试也没用，直接退出
-                    if (false !== strpos($lastError, '鉴权失败')) {
-                        break;
-                    }
-
-                    continue;
-                }
-
-                $clean = $this->stripId3($result['audio']);
-
-                if ('' === $clean) {
-                    $lastError = '音频为空';
-                    continue;
-                }
-
-                $seconds = $this->estimateDuration(strlen($clean), $kbps, $this->sniffExtension($clean));
-
-                if ($seconds >= $capSeconds * self::DEGENERATE_RATIO) {
-                    // 顶到上限 → 判定退化（整段静音），换一次采样重来
-                    $lastError = '输出退化（' . round($seconds) . ' 秒，顶到 ' . round($capSeconds) . ' 秒上限）';
-                    continue;
-                }
-
-                return array(
-                    'ok'         => true,
-                    'error'      => '',
-                    'audio'      => $clean,
-                    'seconds'    => $seconds,
-                    'attempts'   => $attempt,
-                    'degenerate' => false,
-                    // 接收端 v1.2.0+ 的 X-TtsVoice-Model-Cold（本次是否冷加载）
-                    'cold'       => !empty($result['cold']),
-                    // 服务端编不出设置里的格式、自动退回 WAV 时的说明（见 synthesize()）
-                    'notice'     => isset($result['notice']) ? (string) $result['notice'] : '',
-                );
-            }
-
-            return array(
-                'ok'         => false,
-                'error'      => ('' === $lastError ? '未知错误' : $lastError)
-                                . '（已重试 ' . $attempt . ' 次）',
-                'audio'      => '',
-                'seconds'    => 0,
-                'attempts'   => $attempt,
-                'degenerate' => true,
-            );
-        }
-    }
-
-    /**
-     * 微软 Azure 语音（同步 REST）
-     */
-    class TtsVoice_Provider_Azure extends TtsVoice_Provider
-    {
-        /**
-         * @return string
-         */
-        public function id()
-        {
-            return 'azure';
-        }
-
-        /**
-         * @return string
-         */
-        public function label()
-        {
-            return _t('微软 Azure 语音');
-        }
-
-        /**
-         * @return string
-         */
-        public function endpoint()
-        {
-            $endpoint = trim((string) $this->opt('azureEndpoint', ''));
-
-            if ('' !== $endpoint) {
-                return rtrim($endpoint, '/');
-            }
-
-            $region = trim((string) $this->opt('azureRegion', 'eastasia'));
-
-            if ('' === $region) {
-                $region = 'eastasia';
-            }
-
-            return 'https://' . $region . '.tts.speech.microsoft.com';
-        }
-
-        /**
-         * 当前音色
-         *
-         * @return string
-         */
-        protected function voice()
-        {
-            $voice = trim((string) $this->opt('azureVoice', 'zh-CN-XiaoxiaoNeural'));
-
-            return '' === $voice ? 'zh-CN-XiaoxiaoNeural' : $voice;
-        }
-
-        /**
-         * 输出格式
-         *
-         * @return string
-         */
-        protected function outputFormat()
-        {
-            $format = trim((string) $this->opt('azureFormat', 'audio-24khz-48kbitrate-mono-mp3'));
-
-            return '' === $format ? 'audio-24khz-48kbitrate-mono-mp3' : $format;
-        }
-
-        /**
-         * 轻量鉴权自检：合成一个极短文本（200 即视为可用）
-         *
-         * @return array
-         */
-        public function health()
-        {
-            $start = microtime(true);
-            $test  = $this->synthesize('。');
-            $ms    = round((microtime(true) - $start) * 1000);
-
-            if (!$test['ok']) {
-                return array('ok' => false, 'error' => $test['error'], 'ms' => $ms, 'data' => NULL);
-            }
-
-            return array(
-                'ok'    => true,
-                'error' => '',
-                'ms'    => $ms,
-                'data'  => array('voice' => $this->voice(), 'format' => $this->outputFormat(), 'bytes' => strlen($test['audio'])),
-            );
-        }
-
-        /**
-         * Azure 不提供按 Key 拉音色的列表接口（公开列表在文档里），
-         * 这里只回显当前配置并给出说明。
-         *
-         * @return array
-         */
-        public function voices()
-        {
-            return array(
-                'ok'     => true,
-                'error'  => '',
-                'voices' => array($this->voice()),
-                'note'   => 'Azure 音色由「azureVoice」配置决定，完整列表见 Azure 语音文档（zh-CN-XiaoxiaoNeural 等）；此处仅回显当前配置。',
-            );
-        }
-
-        /**
-         * 逐块合成 → 去 ID3 → 拼接 → 落库
-         *
-         * @param int    $cid
-         * @param string $title
-         * @param string $text
-         * @param string $sourceText
-         * @return array
-         */
-        public function submit($cid, $title, $text, $sourceText = '')
-        {
-            return $this->synthesizeAll($cid, $title, $text, $sourceText);
-        }
-
-        /**
-         * @param array $job
-         * @return array|null
-         */
-        public function poll($job)
-        {
-            // 同步服务提交时已经 ready，无需轮询
-            return null;
-        }
-
-        /**
-         * 同步服务没有「远程任务」，删除只需要清理本地（由 Action 负责）
-         *
-         * @param array $job
-         * @return bool
-         */
-        public function delete($job)
-        {
-            return true;
-        }
-
-        /**
-         * 单块合成
-         *
-         * @param string $text
-         * @return array {ok:bool, error:string, audio:string}
-         */
-        protected function synthesize($text)
-        {
-            $key = trim((string) $this->opt('azureKey', ''));
-
-            if ('' === $key) {
-                return array('ok' => false, 'error' => '未配置 azureKey', 'audio' => '');
-            }
-
-            $headers = array(
-                'Ocp-Apim-Subscription-Key: ' . $key,
-                'Content-Type: application/ssml+xml',
-                'X-Microsoft-OutputFormat: ' . $this->outputFormat(),
-                'User-Agent: TtsVoice',
-            );
-
-            $response = $this->httpRequest(
-                'POST',
-                $this->endpoint() . '/cognitiveservices/v1',
-                $headers,
-                $this->ssml($text),
-                $this->syncTimeout(),
-                $this->timeout()
-            );
-
-            if (!$response['ok']) {
-                return array('ok' => false, 'error' => $response['error'], 'audio' => '');
-            }
-
-            if (200 !== $response['code']) {
-                $message = trim(substr(strip_tags($response['body']), 0, 300));
-
-                return array(
-                    'ok'    => false,
-                    'error' => 'HTTP ' . $response['code'] . ('' === $message ? '' : ' ' . $message),
-                    'audio' => '',
-                );
-            }
-
-            if ('' === $response['body']) {
-                return array('ok' => false, 'error' => 'HTTP 200 但音频为空', 'audio' => '');
-            }
-
-            return array('ok' => true, 'error' => '', 'audio' => $response['body']);
-        }
-
-        /**
-         * 生成 SSML 请求体
-         *
-         * @param string $text
-         * @return string
-         */
-        protected function ssml($text)
-        {
-            $voice = $this->voice();
-
-            $rate = trim((string) $this->opt('azureRate', '0%'));
-            $rate = '' === $rate ? '0%' : $rate;
-
-            $pitch = trim((string) $this->opt('azurePitch', '0%'));
-            $pitch = '' === $pitch ? '0%' : $pitch;
-
-            $style = trim((string) $this->opt('azureStyle', ''));
-
-            $esc = function ($value) {
-                return htmlspecialchars((string) $value, ENT_QUOTES | ENT_XML1, 'UTF-8');
-            };
-
-            $inner = "<prosody rate='" . $esc($rate) . "' pitch='" . $esc($pitch) . "'>" . $esc($text) . "</prosody>";
-
-            if ('' !== $style) {
-                $inner = "<mstts:express-as style='" . $esc($style) . "'>" . $inner . "</mstts:express-as>";
-            }
-
-            return "<speak version='1.0' xml:lang='zh-CN'"
-                . " xmlns='http://www.w3.org/2001/10/synthesis'"
-                . " xmlns:mstts='https://www.w3.org/2001/mstts'>"
-                . "<voice name='" . $esc($voice) . "'>" . $inner . "</voice></speak>";
-        }
-
-        /**
-         * 同步服务通用流程：分块 → 合成 → 拼接 → 写库
-         *
-         * @param int    $cid
-         * @param string $title
-         * @param string $text
-         * @param string $sourceText
-         * @param int    $fallbackKbps
-         * @param bool   $estimate    时长是否为估算（OpenAI 用）
-         * @return array
-         */
-        protected function synthesizeAll($cid, $title, $text, $sourceText = '', $fallbackKbps = 48, $estimate = false)
-        {
-            $cid    = intval($cid);
-            $chunks = $this->chunkForSynth($text, $sourceText);
-
-            if (empty($chunks)) {
-                return $this->fail('正文清洗后为空，无法合成');
-            }
-
-            $pieces = array();
-            $sizes  = array();
-            $total  = count($chunks);
-
-            foreach ($chunks as $i => $chunk) {
-                $result = $this->synthesizeChunk($chunk);
-
-                if (!$result['ok']) {
-                    return $this->fail('第 ' . ($i + 1) . '/' . $total . ' 块合成失败：' . $result['error']);
-                }
-
-                // synthesizeChunk 已经去过 ID3
-                $clean = (string) $result['audio'];
-
-                if ('' === $clean) {
-                    return $this->fail('第 ' . ($i + 1) . '/' . $total . ' 块音频为空');
-                }
-
-                $pieces[] = $clean;
-                $sizes[]  = strlen($clean);
-            }
-
-            $relative = $this->audioRelative($cid);
-            $target   = $this->audioTarget($cid);
-
-            if (!$this->writeAudio($pieces, $target)) {
-                return $this->fail('音频写入失败：' . $relative . '（检查 usr/uploads/tts 目录权限）');
-            }
-
-            $kbps = $this->bitrateKbps($this->outputFormatForBitrate(), $fallbackKbps);
-
-            $durations = array();
-
-            foreach ($sizes as $bytes) {
-                $durations[] = $this->estimateDuration($bytes, $kbps);
-            }
-
-            $duration = round(array_sum($durations), 2);
-            $size     = (int) @filesize($target);
-            $chapters = $this->chaptersFromHeadings($sourceText, $text, $chunks, $durations);
-
-            $patch = array(
-                'job_id'   => '',
-                'status'   => 'ready',
-                'title'    => (string) $title,
-                'voice'    => $this->voiceLabel(),
-                'speed'    => '',
-                'progress' => $total . '/' . $total,
-                'duration' => (string) $duration,
-                'size'     => $size,
-                'chapters' => $chapters,
-                'audio'    => $relative,
-                'error'    => '',
-            );
-
-            // 同步型在 submit 内直接落库为 ready
-            TtsVoice_Plugin::saveJob($cid, $patch);
-
-            return array(
-                'ok'       => true,
-                'error'    => '',
-                'jobId'    => '',
-                'status'   => 'ready',
-                'audio'    => $relative,
-                'duration' => $duration,
-                'size'     => $size,
-                'chapters' => $chapters,
-                'progress' => $total . '/' . $total,
-                'voice'    => $this->voiceLabel(),
-                'estimate' => (bool) $estimate,
-            );
-        }
-
-        /**
-         * 用于解析码率的格式（Azure 取 azureFormat）
-         *
-         * @return string
-         */
-        protected function outputFormatForBitrate()
-        {
-            return $this->outputFormat();
-        }
-
-        /**
-         * 写入任务的 voice 字段
-         *
-         * @return string
-         */
-        protected function voiceLabel()
-        {
-            return $this->voice();
-        }
-
-        /**
-         * 统一失败返回
-         *
-         * @param string $error
-         * @return array
-         */
-        protected function fail($error)
-        {
-            return array(
-                'ok'       => false,
-                'error'    => (string) $error,
-                'jobId'    => '',
-                'status'   => 'failed',
-                'audio'    => '',
-                'duration' => 0,
-                'size'     => 0,
-                'chapters' => array(),
-                'progress' => '',
-                'voice'    => '',
-            );
-        }
     }
 
     /**
      * OpenAI 兼容 TTS（同步 REST，POST {base}/audio/speech）
      */
-    class TtsVoice_Provider_OpenAI extends TtsVoice_Provider_Azure
+    class TtsVoice_Provider_OpenAI extends TtsVoice_Provider
     {
         /**
          * @return string
@@ -1661,55 +1083,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
             }
 
             return rtrim($base, '/');
-        }
-
-        /**
-         * 服务类型 —— 固定为本地 Qwen3-TTS
-         *
-         * 设置页已去掉「服务类型」选项（2026-09-13，用户要求），这个服务商现在就是自建 Qwen3-TTS。
-         * 库里残留的 openaiFlavor 键不再影响行为（隐藏键，仅为兼容核心的表单渲染）。
-         *
-         * @return string
-         */
-        protected function flavor()
-        {
-            return 'qwen3tts';
-        }
-
-        /**
-         * 该服务类型的**真实**音色列表（实测/官方文档）
-         *
-         * @return array
-         */
-        protected function builtinVoices()
-        {
-            if ('openai' === $this->flavor()) {
-                return array('alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer',
-                             'ash', 'ballad', 'coral', 'sage', 'verse');
-            }
-
-            // 自建 Qwen3-TTS：**没有预置音色**。插件只支持克隆，
-            // 音色完全由「音色样本」决定，所以这里没有任何候选名。
-            return array();
-        }
-
-        /**
-         * @return string
-         */
-        protected function voice()
-        {
-            // 注意：自建 Qwen3-TTS 现在**恒走克隆**，这个 voice() 只服务于
-            // 云端 OpenAI 分支（flavor 不是 qwen3tts）。openaiVoice 这个键已经从
-            // 配置里删掉，所以这里基本只会走到默认值。
-            $voice    = trim((string) $this->opt('openaiVoice', 'alloy'));
-            $fallback = ('openai' === $this->flavor()) ? 'alloy' : 'uncle_fu';
-
-            // 兼容老站点库里残留的 'custom'：它不是真实说话人名，直接换成默认值。
-            if ('' === $voice || 'custom' === strtolower($voice)) {
-                return $fallback;
-            }
-
-            return $voice;
         }
 
         /**
@@ -1772,11 +1145,16 @@ if (!class_exists('TtsVoice_Provider', false)) {
          */
         protected function sampling()
         {
+            /*
+             * 这组值是反复对照试出来的「不退化」组合（详见 SPEC-TO-MINI-job-queue.md §14）：
+             * 上游默认把 repetition_penalty 压成 1.0，长句会整段退化成噪声；
+             * 显式补上 1.05 后 1/4 → 4/4 正常。因此不再暴露成配置项 —— 它们是实验结论，不是用户选项。
+             */
             return array(
-                'temperature'        => floatval($this->opt('openaiTemperature', '0.7')),
-                'top_p'              => floatval($this->opt('openaiTopP', '0.9')),
-                'top_k'              => intval($this->opt('openaiTopK', '40')),
-                'repetition_penalty' => floatval($this->opt('openaiRepPenalty', '1.05')),
+                'temperature'        => 0.7,
+                'top_p'              => 0.9,
+                'top_k'              => 40,
+                'repetition_penalty' => 1.05,
             );
         }
 
@@ -1857,16 +1235,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /**
-         * @return string
-         */
-        protected function model()
-        {
-            $model = trim((string) $this->opt('openaiModel', 'gpt-4o-mini-tts'));
-
-            return '' === $model ? 'gpt-4o-mini-tts' : $model;
-        }
-
-        /**
          * 克隆用的模型（Base）
          *
          * 名字的读取/兜底统一放在 TtsVoice_Plugin::cloneModelName()（面板也要用同一份判断）。
@@ -1879,19 +1247,12 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /**
-         * 当前这次请求实际会用的模型
-         *
-         * 自建 Qwen3-TTS：**恒为 Base**（克隆是唯一的模式 —— 预置音色已下线，
-         * 音色只能来自参考音频）。云端 OpenAI 分支（flavor 不是 qwen3tts）仍用 openaiModel。
+         * 当前这次请求实际会用的模型（只剩克隆一条路，恒为 Base）
          *
          * @return string
          */
         protected function activeModel()
         {
-            if ('qwen3tts' !== $this->flavor()) {
-                return $this->model();
-            }
-
             return $this->cloneModel();
         }
 
@@ -1925,13 +1286,7 @@ if (!class_exists('TtsVoice_Provider', false)) {
          */
         public function health()
         {
-            $key   = trim((string) $this->opt('openaiKey', ''));
-            $local = ('qwen3tts' === $this->flavor());
-
-            // 自建 Qwen3-TTS 通常不鉴权，允许 Key 留空
-            if ('' === $key && !$local) {
-                return array('ok' => false, 'error' => '未配置 openaiKey', 'ms' => 0, 'data' => NULL);
-            }
+            $key = trim((string) $this->opt('openaiKey', ''));
 
             $headers = array('Accept: application/json');
 
@@ -1968,7 +1323,24 @@ if (!class_exists('TtsVoice_Provider', false)) {
             }
 
             $decoded = json_decode($response['body'], true);
-            $count   = (is_array($decoded) && isset($decoded['data']) && is_array($decoded['data']))
+
+            /*
+             * 【必须是 JSON】地址填成别的服务（NAS 管理页 / 反代首页）时，对方往往对任何
+             * 路径都回 200 + HTML，以前这里照样判「通过」，而真正合成时全挂。
+             */
+            if (!is_array($decoded)) {
+                $hint = substr(trim(strip_tags((string) $response['body'])), 0, 120);
+
+                return array(
+                    'ok'    => false,
+                    'error' => 'HTTP 200 但不是 JSON（地址可能填错了）'
+                               . ('' === $hint ? '' : '：' . $hint),
+                    'ms'    => $ms,
+                    'data'  => NULL,
+                );
+            }
+
+            $count = (isset($decoded['data']) && is_array($decoded['data']))
                 ? count($decoded['data'])
                 : 0;
 
@@ -1979,9 +1351,7 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 'data'  => array(
                     'models'       => $count,
                     'model'        => $this->activeModel(),
-                    'mode'         => ('qwen3tts' === $this->flavor())
-                        ? (TtsVoice_Plugin::hasCloneVoice() ? 'clone(Base)' : 'no-sample')
-                        : 'openai',
+                    'mode'         => TtsVoice_Plugin::hasCloneVoice() ? 'clone(Base)' : 'no-sample',
                     'cloneModel'   => $this->cloneModel(),
                     'hasSample'    => TtsVoice_Plugin::hasCloneVoice(),
                 ),
@@ -1989,31 +1359,20 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /**
+         * 可用音色列表
+         *
+         * 自建 Qwen3-TTS 没有预置音色：音色完全由上传的「音色样本」决定。
+         *
          * @return array
          */
         public function voices()
         {
-            $flavor  = $this->flavor();
-
-            // 自建 Qwen3-TTS：只有克隆，没有可枚举的预置音色
-            if ('qwen3tts' === $flavor) {
-                return array(
-                    'ok'     => true,
-                    'error'  => '',
-                    'voices' => array(),
-                    'note'   => '自建 Qwen3-TTS 只支持「自定义音色」：没有预置音色列表，'
-                                . '音色完全由上传的「音色样本」决定。',
-                );
-            }
-
-            $builtin = $this->builtinVoices();
-            $label   = ('openai' === $flavor) ? 'OpenAI 官方' : '自定义';
-
             return array(
                 'ok'     => true,
                 'error'  => '',
-                'voices' => $builtin,
-                'note'   => $label . '音色 ' . count($builtin) . ' 个',
+                'voices' => array(),
+                'note'   => '自建 Qwen3-TTS 只支持「自定义音色」：没有预置音色列表，'
+                            . '音色完全由上传的「音色样本」决定。',
             );
         }
 
@@ -2025,28 +1384,22 @@ if (!class_exists('TtsVoice_Provider', false)) {
          * @return array
          */
         /**
-         * 是否走异步任务模型
+         * 是否走异步任务队列（现在恒为 true）
          *
-         * 自建 Qwen3-TTS 在本机 GPU 上约等于实时（实测 RTF≈1.15，3000 字要 11 分钟）。
-         * 同步等完会把 PHP / nginx 的连接一直挂着，用户还得在文章页干等 —— 所以走异步。
-         *
-         * 真正的 OpenAI 云端服务很快，保持同步更简单，也省一次轮询往返。
+         * 合成跑在 TTS 主机上，网站只负责提交与轮询 —— 关掉页面也不丢进度。
          *
          * @return bool
          */
         public function isAsync()
         {
-            return ('qwen3tts' === $this->flavor());
+            return true;
         }
 
         /**
-         * 提交任务
+         * 提交到 TTS 主机的作业队列
          *
-         * 异步（qwen3tts）：**不在这个请求里合成**，只切块 + 落一条 queued 任务就返回。
-         * 真正的合成交给 poll() —— 浏览器轮询一次就合成一块。
-         *
-         * 所以文章页点「生成」是立刻返回的，不用等 11 分钟；
-         * 而且关掉页面也不丢进度（状态都在 tts_jobs 表里，下次打开接着跑）。
+         * 只保留队列路径：分块、max_tokens、音色都由这里决定，
+         * 接收端负责排队、逐块合成、退化重试与拼接。
          *
          * @param int    $cid
          * @param string $title
@@ -2056,11 +1409,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
          */
         public function submit($cid, $title, $text, $sourceText = '')
         {
-            if (!$this->isAsync()) {
-                // 云端 OpenAI：mp3 无固定码率，时长按 128 kbps 估算（返回里标 estimate）
-                return $this->synthesizeAll($cid, $title, $text, $sourceText, 128, true);
-            }
-
             $cid    = intval($cid);
             $chunks = $this->chunkForSynth($text, $sourceText);
 
@@ -2068,17 +1416,16 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 return $this->fail('正文清洗后为空，无法合成');
             }
 
-            // ① 首选：交给 TTS 主机上的队列（接收端 v1.3.0+ 的 /jobs）。
-            //    合成跑在服务商侧，浏览器/网站关掉任务也会继续 → 不再依赖后台页面在线。
-            //    返回 null 表示「这台接收端没有 /jobs」（老版本，或直连 Qwen），走下面的回退。
             $remote = $this->submitRemoteJob($cid, $title, $chunks);
 
-            if (NULL !== $remote) {
-                return $remote;
+            if (NULL === $remote) {
+                return $this->fail(
+                    'TTS 主机不支持作业队列（接收端过旧或地址不对）。'
+                    . '请把接收端升级到 v1.3.0+，并在设置页确认「Qwen 服务端地址」指向接收端。'
+                );
             }
 
-            // ② 回退：老的「浏览器驱动、每次轮询跑一块」
-            return $this->submitLocalJob($cid, $title, $chunks);
+            return $remote;
         }
 
         /**
@@ -2202,9 +1549,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
 
             TtsVoice_Plugin::saveJob($cid, $patch);
 
-            // 老路径可能留下过块文件，清掉免得占地方
-            $this->clearParts($cid);
-
             return array(
                 'ok'       => true,
                 'error'    => '',
@@ -2221,89 +1565,16 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /**
-         * 老路径：浏览器驱动，每次 poll() 在本请求里跑一块（接收端没有 /jobs 时的回退）
+         * 查一次远端任务状态；就绪则下载收尾
          *
-         * @param int    $cid
-         * @param string $title
-         * @param array  $chunks
-         * @return array
-         */
-        protected function submitLocalJob($cid, $title, array $chunks)
-        {
-            // 【1.6.8 起样本可选】没上传样本就不带 ref_audio，由接收端用它自己的
-            // 默认音色（<dir>/default/ref.wav）；上传过才校验路径。
-            //
-            // 参考音频必须在「TTS 主机」上真的存在。
-            //
-            // 【跨机时不要在本机 is_file】refAudioPath 是 **TTS 主机上**的路径，
-            // 网站和 TTS 不在同一台机器时，本机当然看不到这个文件 ——
-            // 硬判 is_file 会把「跨机 + 远端文件其实存在」误判成失败。
-            // 所以：配了接收端就交给服务端判（它读的是自己本机路径）；
-            // 只有「同机 / 共享存储」（没配接收端）才在本机提前挡一下。
-            $refFile = TtsVoice_Plugin::refAudioForHost();
-
-            if ('' !== $refFile
-                && '' === trim((string) TtsVoice_Plugin::refUploadUrl())
-                && !is_file($refFile)) {
-                return $this->fail(
-                    '音色样本文件不存在：' . $refFile . '。请到「设置 → TtsVoice → 音色样本」重新上传。'
-                );
-            }
-
-            // 清掉上一轮的半成品，避免和这次混在一起
-            $this->clearParts($cid);
-
-            $total = count($chunks);
-            $patch = array(
-                'job_id'   => 'qwen-' . $cid . '-' . time(),
-                'status'   => 'queued',
-                'title'    => (string) $title,
-                'voice'    => TtsVoice_Plugin::jobVoiceTag(),
-                'speed'    => '',
-                'progress' => '0/' . $total,
-                'duration' => '',
-                'size'     => 0,
-                'chapters' => array(),
-                'audio'    => '',
-                'error'    => '',
-            );
-
-            TtsVoice_Plugin::saveJob($cid, $patch);
-
-            return array(
-                'ok'       => true,
-                'error'    => '',
-                'jobId'    => $patch['job_id'],
-                'status'   => 'queued',
-                'audio'    => '',
-                'duration' => 0,
-                'size'     => 0,
-                'chapters' => array(),
-                'progress' => $patch['progress'],
-                'voice'    => $patch['voice'],
-                'estimate' => true,
-            );
-        }
-
-        /**
-         * 轮询推进（异步泵）
-         *
-         * 每次被调用只做**一块**：合成 → 去 ID3 → 存成单独的块文件 → 进度 +1。
-         *
-         * 块文件分开存（而不是追加到同一个文件）是为了收尾时能拿到每块的字节数 ——
-         * 章节时间轴要靠它算每块的时长。代价是多几个小文件，收尾时统一清掉。
-         *
-         * 分块默认 180 字（约 40 秒），稳稳落在 nginx 默认的 60 秒 FastCGI 超时内。
+         * 合成在 TTS 主机上跑，这里只做两件轻活：查状态；就绪后下载。
+         * 所以浏览器关掉 / 页面跳走都不影响任务 —— 下次谁来查都能接上。
          *
          * @param array $job
          * @return array|null
          */
         public function poll($job)
         {
-            if (!$this->isAsync()) {
-                return null;
-            }
-
             $job    = is_array($job) ? $job : array();
             $cid    = intval(isset($job['cid']) ? $job['cid'] : 0);
             $status = (string) (isset($job['status']) ? $job['status'] : '');
@@ -2312,164 +1583,17 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 return null;
             }
 
-            // 【服务商侧队列】（接收端 v1.3.0+ 的 /jobs）
-            // 合成在 TTS 主机上跑，这里只做两件轻活：查状态；就绪后下载收尾。
-            // 所以浏览器关掉 / 页面跳走都不影响任务 —— 下次谁来查都能接上。
             $jobId = isset($job['job_id']) ? (string) $job['job_id'] : '';
 
-            if (0 === strpos($jobId, 'j-')) {
-                return $this->pollRemoteJob($cid, $jobId, $job);
-            }
-
-            // 【每次 HTTP 请求只推进一块】
-            //
-            // 面板列表页走的是 batch 接口，一次会查很多篇。如果每篇都推进一块，
-            // 10 篇就是 10 块 ≈ 400 秒，必然撞上 nginx 默认的 60 秒 FastCGI 超时。
-            // 用请求级 static 限流：本次请求已经干过活就不再干，剩下的留给下一次轮询
-            // —— 轮询本来就是持续在跑的，整体速度不受影响，只是把工作摊平。
-            static $pumpedThisRequest = false;
-
-            if ($pumpedThisRequest) {
-                return null;
-            }
-
-            // poll() 只拿得到任务行，没有正文 —— 按 cid 读回来重算分块。
-            // 分块是确定性的（同样的正文 + 同样的 chunkChars → 同样的块），
-            // 所以不用把分块结果存进数据库，也就不用改表结构。
-            $post = TtsVoice_Plugin::postForTts($cid);
-
-            if (!$post) {
-                return array('status' => 'failed', 'error' => '文章不存在或已被删除');
-            }
-
-            $chunks = $this->chunkForSynth($post['text'], $post['source']);
-            $total  = count($chunks);
-
-            if (0 === $total) {
-                return array('status' => 'failed', 'error' => '正文清洗后为空');
-            }
-
-            // 进度存在 progress 的 "done/total" 里
-            $done = 0;
-
-            if (preg_match('#^(\d+)/#', (string) (isset($job['progress']) ? $job['progress'] : ''), $m)) {
-                $done = intval($m[1]);
-            }
-
-            // 块都齐了 → 收尾（正常情况下这里是兜底，不会走到）
-            if ($done >= $total) {
-                return $this->finishAsync($cid, $post, $chunks);
-            }
-
-            $result = $this->synthesizeChunk($chunks[$done]);
-
-            // 从这一刻起本次请求已经占用了「一块」的预算，后面的任务不再推进
-            $pumpedThisRequest = true;
-
-            if (empty($result['ok'])) {
+            // 只剩队列任务（j- 开头）。历史脏行 / 手动改库都会落到这里，直接判失败让用户重生成。
+            if (0 !== strpos($jobId, 'j-')) {
                 return array(
                     'status' => 'failed',
-                    'error'  => '第 ' . ($done + 1) . '/' . $total . ' 块合成失败：'
-                                . (isset($result['error']) ? $result['error'] : '未知错误'),
+                    'error'  => '任务标识无效（不是队列任务），请重新生成',
                 );
             }
 
-            // synthesizeChunk 返回的已经是去掉 ID3 的音频
-            $clean = (string) $result['audio'];
-
-            if ('' === $clean) {
-                return array('status' => 'failed', 'error' => '第 ' . ($done + 1) . '/' . $total . ' 块音频为空');
-            }
-
-            $part = $this->partFile($cid, $done);
-            $dir  = dirname($part);
-
-            if (!is_dir($dir) && !@mkdir($dir, 0755, true) && !is_dir($dir)) {
-                return array('status' => 'failed', 'error' => '无法创建目录 ' . $dir);
-            }
-
-            if (false === @file_put_contents($part, $clean)) {
-                return array('status' => 'failed', 'error' => '音频写入失败：' . $part);
-            }
-
-            $done++;
-
-            // 还有块没跑完 → 只报进度，等下一次轮询继续
-            if ($done < $total) {
-                return array('status' => 'running', 'progress' => $done . '/' . $total);
-            }
-
-            return $this->finishAsync($cid, $post, $chunks);
-        }
-
-        /**
-         * 收尾：拼接所有块 → 落成最终音频 → 算时长与章节 → 清掉临时块
-         *
-         * @param int   $cid
-         * @param array $post
-         * @param array $chunks
-         * @return array
-         */
-        protected function finishAsync($cid, array $post, array $chunks)
-        {
-            $total  = count($chunks);
-            $pieces = array();
-            $sizes  = array();
-
-            for ($i = 0; $i < $total; $i++) {
-                $part = $this->partFile($cid, $i);
-
-                if (!is_file($part)) {
-                    return array(
-                        'status' => 'failed',
-                        'error'  => '第 ' . ($i + 1) . '/' . $total . ' 块缺失，请重新生成',
-                    );
-                }
-
-                $data = @file_get_contents($part);
-
-                if (false === $data || '' === $data) {
-                    return array('status' => 'failed', 'error' => '第 ' . ($i + 1) . ' 块读取失败');
-                }
-
-                $pieces[] = $data;
-                $sizes[]  = strlen($data);
-            }
-
-            // 以第一块的**真实字节**定容器（上游/接收端可能不按 response_format 给）
-            $ext      = $this->sniffExtension($pieces[0]);
-            $relative = $this->audioRelative($cid, $ext);
-            $target   = $this->audioTarget($cid, $ext);
-
-            if (!$this->writeAudio($pieces, $target)) {
-                return array(
-                    'status' => 'failed',
-                    'error'  => '音频写入失败：' . $relative . '（检查 usr/uploads/tts 目录权限）',
-                );
-            }
-
-            // 换过格式的话，清掉同一篇的旧格式文件（见 dropStaleAudio）
-            $this->dropStaleAudio($cid, $ext);
-
-            // 拼接完成后统一做本地变速（失败不影响出片，顶多语速是原速）
-            $factor    = $this->applySpeed($target, $ext);
-            $durations = $this->durationsFromSizes($sizes, $factor, $ext);
-
-            $chapters = $this->chaptersFromHeadings($post['source'], $post['text'], $chunks, $durations);
-
-            $this->clearParts($cid);
-
-            return array(
-                'status'   => 'ready',
-                'title'    => (string) $post['title'],
-                'voice'    => TtsVoice_Plugin::jobVoiceTag(),
-                'progress' => $total . '/' . $total,
-                'duration' => (string) round(array_sum($durations), 2),
-                'size'     => (int) @filesize($target),
-                'chapters' => $chapters,
-                'audio'    => $relative,
-                'error'    => $this->formatNotice($ext),
-            );
+            return $this->pollRemoteJob($cid, $jobId, $job);
         }
 
         /* ============================================================== */
@@ -2659,7 +1783,15 @@ if (!class_exists('TtsVoice_Provider', false)) {
 
             $json = json_decode((string) $response['body'], true);
 
-            if (200 !== $response['code'] || !is_array($json) || empty($json['ok'])) {
+            if (200 === $response['code'] && (!is_array($json) || empty($json['ok']))) {
+                // 200 却不是有效 JSON → 多半是反代/登录页，直接判失败（网络类错误仍留给超时兜底）
+                return array(
+                    'status' => 'failed',
+                    'error'  => 'TTS 主机返回了非 JSON 响应：' . $this->receiverError($response),
+                );
+            }
+
+            if (200 !== $response['code'] || !is_array($json)) {
                 return NULL;
             }
 
@@ -2692,7 +1824,17 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 return $this->finishRemoteJob($cid, $jobId, $json);
             }
 
-            return NULL;
+            /*
+             * 未知状态（接收端改过状态名 / 反代塞了别的东西）：
+             * 以前返回 NULL＝「下次再查」，任务会永远卡住且没有任何提示。
+             * 现在直接判失败，并把原始状态带给用户。
+             */
+            return array(
+                'status' => 'failed',
+                'error'  => 'TTS 主机返回了未知任务状态：'
+                            . ('' === $remoteStatus ? '(空)' : $remoteStatus)
+                            . '；请升级接收端或重新生成',
+            );
         }
 
         /**
@@ -2729,6 +1871,20 @@ if (!class_exists('TtsVoice_Provider', false)) {
 
             if ('' === $clean) {
                 return array('status' => 'failed', 'error' => '从 TTS 主机下载的音频为空');
+            }
+
+            /*
+             * 【必须是音频】反代/接收端出错时可能回 200 + JSON/HTML，以前会照样写盘并标 ready，
+             * 播放器拿到坏文件却看不出来。这里做一次魔数校验，失败时把响应片段带出来。
+             */
+            if (!$this->looksLikeAudio($clean)) {
+                $hint = substr(trim(strip_tags((string) $audio['body'])), 0, 160);
+
+                return array(
+                    'status' => 'failed',
+                    'error'  => 'TTS 主机返回的不是音频（可能是反代错误页）。'
+                                . ('' === $hint ? '' : '响应片段：' . $hint),
+                );
             }
 
             // 接收端返回的可能是 mp3（v1.3.0 只吐 mp3），而网站配置成了 wav
@@ -2771,12 +1927,10 @@ if (!class_exists('TtsVoice_Provider', false)) {
 
             $chapters = $this->chaptersFromHeadings($post['source'], $post['text'], $chunks, $durations);
 
-            // 收尾完成 → 让 TTS 主机清掉产物（best effort，失败不影响本地）
-            $this->receiverRequest('DELETE', '/jobs/' . rawurlencode($jobId), NULL, 10);
-
-            $this->clearParts($cid);
-
+            // 收尾完成 → 远端产物由调用方在**落库成功之后**再删（cleanup 字段）。
+            // 以前在这里先删，一旦 saveJob() 失败，远端已删、本地还是 running，整篇白跑。
             return array(
+                'cleanup'  => $jobId,
                 'status'   => 'ready',
                 'title'    => (string) $post['title'],
                 'voice'    => TtsVoice_Plugin::jobVoiceTag(),
@@ -2787,6 +1941,86 @@ if (!class_exists('TtsVoice_Provider', false)) {
                 'audio'    => $relative,
                 'error'    => $this->formatNotice($ext),
             );
+        }
+
+        /**
+         * 探测接收端作业队列（Doctor 用）
+         *
+         * 主链路走的是 `/jobs`（X-TtsVoice-Token），而 health() 打的是 `/v1/models`（Bearer）。
+         * 两者可能一个通一个不通（token 轮换 / 反代只放行了 /v1），所以自检必须各探一次。
+         *
+         * @return array {ok, error, jobs}
+         */
+        public function probeQueue()
+        {
+            $response = $this->receiverRequest('GET', '/jobs', NULL, 8);
+
+            if (NULL === $response) {
+                return array('ok' => false, 'error' => '未配置接收端地址（openaiBaseUrl 为空或不是 http(s)）', 'jobs' => 0);
+            }
+
+            if (!$response['ok']) {
+                return array('ok' => false, 'error' => (string) $response['error'], 'jobs' => 0);
+            }
+
+            if (200 !== $response['code']) {
+                return array(
+                    'ok'    => false,
+                    'error' => 'HTTP ' . $response['code'] . '：' . $this->receiverError($response),
+                    'jobs'  => 0,
+                );
+            }
+
+            $json = json_decode((string) $response['body'], true);
+
+            if (!is_array($json) || empty($json['ok'])) {
+                return array('ok' => false, 'error' => '返回不是有效 JSON / ok=false', 'jobs' => 0);
+            }
+
+            $jobs = (isset($json['jobs']) && is_array($json['jobs'])) ? count($json['jobs']) : 0;
+
+            return array('ok' => true, 'error' => '', 'jobs' => $jobs);
+        }
+
+        /**
+         * 收尾后清理远端产物（落库成功之后调用）
+         *
+         * @param string $jobId
+         * @return void
+         */
+        public function cleanup($jobId)
+        {
+            $jobId = (string) $jobId;
+
+            if (0 === strpos($jobId, 'j-')) {
+                $this->receiverRequest('DELETE', '/jobs/' . rawurlencode($jobId), NULL, 10);
+            }
+        }
+
+        /**
+         * 字节串看起来是不是音频（RIFF / ID3 / MPEG 帧同步）
+         *
+         * @param string $data
+         * @return bool
+         */
+        protected function looksLikeAudio($data)
+        {
+            $data = (string) $data;
+
+            if (strlen($data) < 4) {
+                return false;
+            }
+
+            if ('RIFF' === substr($data, 0, 4)) {
+                return true;
+            }
+
+            if ('ID3' === substr($data, 0, 3)) {
+                return true;
+            }
+
+            // MPEG 音频帧同步：11 位全 1
+            return "\xFF" === substr($data, 0, 1) && (ord($data[1]) & 0xE0) === 0xE0;
         }
 
         /**
@@ -2806,304 +2040,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
             return true;
         }
 
-        /**
-         * 临时块目录
-         *
-         * @return string
-         */
-        protected function partDir()
-        {
-            return TtsVoice_Plugin::audioPath() . '/_part';
-        }
-
-        /**
-         * 单块临时文件路径
-         *
-         * @param int $cid
-         * @param int $index
-         * @return string
-         */
-        protected function partFile($cid, $index)
-        {
-            return $this->partDir() . '/' . intval($cid) . '.' . intval($index) . '.bin';
-        }
-
-        /**
-         * 清掉某个任务的全部临时块
-         *
-         * @param int $cid
-         * @return void
-         */
-        protected function clearParts($cid)
-        {
-            $files = @glob($this->partDir() . '/' . intval($cid) . '.*.bin');
-
-            if (is_array($files)) {
-                foreach ($files as $file) {
-                    @unlink($file);
-                }
-            }
-        }
-
-        /**
-         * 单块合成
-         *
-         * @param string $text
-         * @return array {ok:bool, error:string, audio:string}
-         */
-        protected function synthesizeAs($text, $maxTokens, $format)
-        {
-            $key   = trim((string) $this->opt('openaiKey', ''));
-            $local = ('qwen3tts' === $this->flavor());
-
-            // 自建 Qwen3-TTS 通常不鉴权，允许 Key 留空
-            if ('' === $key && !$local) {
-                return array('ok' => false, 'error' => '未配置 openaiKey', 'audio' => '');
-            }
-
-            $payload = array(
-                'input'           => (string) $text,
-                'response_format' => (string) $format,
-                // 自建 Qwen3-TTS：上游的 speed 是空实现（传了不生效），变速交给
-                // 本地 ffmpeg atempo，这里恒为 1.0，免得将来上游实现了变成双重变速。
-                // 云端 OpenAI：speed 是真的（0.25~4.0），照旧传。
-                'speed'           => $local ? 1.0 : $this->speedFactor(),
-            );
-
-            // 自建 Qwen3-TTS：显式给出采样参数，绕开上游「repetition_penalty 被压成 1.0」
-            // 导致的整段退化。云端 OpenAI 不认这些字段，不能带。
-            if ($local) {
-                $payload += $this->sampling();
-            }
-
-            // 显式给出 max_tokens：
-            //   1. 封顶「退化时一路生成到上限」的损失
-            //   2. 让退化可判定 —— 退化输出时长会正好等于 max_tokens × 0.08
-            // 详见基类里 SECONDS_PER_TOKEN / TOKENS_PER_CHAR 的注释。
-            if ($maxTokens > 0) {
-                $payload['max_tokens'] = (int) $maxTokens;
-            }
-
-            // 【模型与音色：自建 Qwen3-TTS 恒为克隆】
-            //
-            // Base + ref_audio，**绝不带 voice**（Base 会静默忽略 voice，
-            // 让人以为「克隆没生效」）。参考文本 ref_text 可选：填了走 ICL，
-            // 内容必须与音频逐字一致，否则会引入杂音（详见设置页说明）。
-            //
-            // 云端 OpenAI 没有「克隆」这个概念，仍用 openaiModel + voice。
-            if ($local) {
-                $payload['model'] = $this->cloneModel();
-
-                /*
-                 * 【音色样本可选】只带**服务端能读到**的路径：
-                 *   · refAudioPath（已推到 TTS 主机）优先；
-                 *   · 没配接收端（同机 / 共享存储）时，本机路径就是服务端路径；
-                 *   · 两者都没有 → 不带 ref_audio，服务端用它的默认音色。
-                 * 绝不能把「网站本机路径」发给**异地**接收端（它读自己那台机器，只会报
-                 * "ref_audio not found"）。
-                 */
-                $refHost = trim((string) TtsVoice_Plugin::opt('refAudioPath', ''));
-
-                if ('' === $refHost && '' === trim((string) TtsVoice_Plugin::refUploadUrl())) {
-                    $refHost = trim((string) TtsVoice_Plugin::refAudioFile());
-                }
-
-                if ('' !== $refHost) {
-                    $payload['ref_audio'] = $refHost;
-
-                    $refText = TtsVoice_Plugin::refText();
-
-                    if ('' !== $refText) {
-                        $payload['ref_text'] = $refText;
-                    }
-                }
-            } else {
-                $payload['model'] = $this->model();
-                $payload['voice'] = $this->voice();
-            }
-
-            $payload = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-
-            $headers = array(
-                'Content-Type: application/json',
-                // 跟着 response_format 走：上游按 Accept 协商时，声明 mp3 却要 wav 会被拒
-                'Accept: ' . ('wav' === strtolower((string) $format) ? 'audio/wav' : 'audio/mpeg'),
-            );
-
-            if ('' !== $key) {
-                array_unshift($headers, 'Authorization: Bearer ' . $key);
-            }
-
-            $response = $this->httpRequest(
-                'POST',
-                $this->endpoint() . '/audio/speech',
-                $headers,
-                $payload,
-                $this->syncTimeout(),
-                $this->timeout()
-            );
-
-            if (!$response['ok']) {
-                // 网络错误/超时最常见的原因之一就是「模型在冷加载」。
-                // 接收端 v1.2.0+ 的 /voice/status 能告诉我们当前哪个模型没驻留，
-                // 查得到就补一句人话提示 —— 区分「这次慢是冷加载」和「真的坏了」。
-                return array(
-                    'ok'    => false,
-                    'error' => $response['error'] . TtsVoice_Plugin::coldModelHint(),
-                    'audio' => '',
-                    'cold'  => false,
-                );
-            }
-
-            if (200 !== $response['code']) {
-                $message = trim(substr(strip_tags($response['body']), 0, 300));
-
-                // 鉴权类错误单独给一条能照着做的提示。
-                // 自建服务常见两种情况：开了鉴权但插件没填密钥，或填的密钥对不上。
-                // （服务端如果没开鉴权，插件留空即可，根本不会走到这里。）
-                if (in_array($response['code'], array(401, 403), true)) {
-                    $sent = trim((string) $this->opt('openaiKey', ''));
-
-                    $hint = ('' === $sent)
-                        ? '服务端要鉴权，但「Qwen 鉴权 Key」是空的 —— 请填上它要求的密钥；'
-                          . '若服务端本来没开鉴权，检查是不是中间的反向代理在强制校验。'
-                        : '密钥被拒绝 —— 检查「Qwen 鉴权 Key」与服务端是否完全一致（注意多余空格）。';
-
-                    return array(
-                        'ok'    => false,
-                        'error' => 'HTTP ' . $response['code'] . ' 鉴权失败：' . $hint
-                                   . ('' === $message ? '' : '　服务端返回：' . $message),
-                        'audio' => '',
-                        'cold'  => false,
-                    );
-                }
-
-                return array(
-                    'ok'    => false,
-                    'error' => 'HTTP ' . $response['code'] . ('' === $message ? '' : ' ' . $message)
-                               . ($this->isColdResponse($response) ? TtsVoice_Plugin::coldModelHint(true) : ''),
-                    'audio' => '',
-                    'cold'  => $this->isColdResponse($response),
-                );
-            }
-            if ('' === $response['body']) {
-                return array('ok' => false, 'error' => 'HTTP 200 但音频为空', 'audio' => '', 'cold' => false);
-            }
-
-            return array(
-                'ok'     => true,
-                'error'  => '',
-                'audio'  => $response['body'],
-                'format' => (string) $format,
-                // 接收端在转发前判定的「本次是否冷加载」（v1.2.0+ 才有的响应头）
-                'cold'   => $this->isColdResponse($response),
-            );
-        }
-
-        /**
-         * 合成一块（对外入口）：**请求的格式拿不到就退回 WAV**
-         *
-         * 【为什么要有这个兜底】服务端（接收端 / mlx-audio 那台机器）如果没有 ffmpeg，
-         * 就编不出 mp3 —— 以前这种情况下整块直接失败，用户拿不到任何音频。
-         * 而 WAV 是**不需要 ffmpeg 就能产出**的（上游直接写 PCM）。
-         * 所以：按设置的格式请求 → 如果服务端明确表示「这个格式我编不出来」→
-         * 自动改用 wav 再试一次，成功就照用，并在结果里带一句 notice 让面板提醒。
-         *
-         * 队列模式（/jobs）不需要这层：那边返回什么格式，网站收尾时会按**真实字节**
-         * 定后缀（见 sniffExtension），本来就不会因为格式不符而失败。
-         *
-         * @param string $text
-         * @param int    $maxTokens
-         * @return array
-         */
-        protected function synthesize($text, $maxTokens = 0)
-        {
-            $wanted = $this->outputFormat();
-            $result = $this->synthesizeAs($text, $maxTokens, $wanted);
-
-            // 已经要的就是 wav，或者成功了，就没什么好退的
-            if (!empty($result['ok']) || 'wav' === strtolower($wanted)) {
-                return $result;
-            }
-
-            // 只有「看起来是格式/编码问题」才值得换 wav 重试；鉴权、超时之类重试没意义
-            if (!$this->isFormatUnsupported($result)) {
-                return $result;
-            }
-
-            $retry = $this->synthesizeAs($text, $maxTokens, 'wav');
-
-            if (!empty($retry['ok'])) {
-                $retry['notice'] = '服务端编不出 ' . strtoupper($wanted)
-                    . '（多半是那台机器没装 ffmpeg），已自动改用 WAV —— 播放与下载都正常，'
-                    . '只是体积会大一些。';
-
-                return $retry;
-            }
-
-            // 换 wav 也不行：把**第一次**的错误报出来（那才是根因）
-            return $result;
-        }
-
-        /**
-         * 失败原因看起来是不是「这个格式编不出来」
-         *
-         * 只看关键词，宁可多试一次 wav（代价是一次请求），也不要漏掉兜底。
-         *
-         * @param array $result synthesizeAs() 的返回
-         * @return bool
-         */
-        protected function isFormatUnsupported($result)
-        {
-            $hay = strtolower((string) (isset($result['error']) ? $result['error'] : ''));
-            $hay .= ' ' . strtolower((string) (isset($result['detail']) ? $result['detail'] : ''));
-
-            foreach (array('ffmpeg', 'unsupported', 'response_format', 'format not',
-                           'encoder', 'encode', '无法编码', '编码失败', '转码') as $needle) {
-                if (false !== strpos($hay, $needle)) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        /**
-         * 响应头里有没有「本次冷加载」标记
-         *
-         * 接收端 v1.2.0+ 会在合成响应上带 `X-TtsVoice-Model-Cold`（转发前判定）。
-         * 旧接收端没有这个头，返回 false —— 不影响任何行为。
-         *
-         * @param array $response httpRequest() 的返回
-         * @return bool
-         */
-        protected function isColdResponse($response)
-        {
-            if (empty($response['headers']) || !is_array($response['headers'])) {
-                return false;
-            }
-
-            $value = strtolower(trim((string) (isset($response['headers']['x-ttsvoice-model-cold'])
-                ? $response['headers']['x-ttsvoice-model-cold']
-                : '')));
-
-            if ('' === $value) {
-                return false;
-            }
-
-            return !in_array($value, array('0', 'false', 'no', 'off'), true);
-        }
-
-        /**
-         * 覆盖父类，避免把 Azure 的 SSML 逻辑误用到 OpenAI
-         *
-         * @param string $text
-         * @return string
-         */
-        protected function ssml($text)
-        {
-            return (string) $text;
-        }
     }
 }
 

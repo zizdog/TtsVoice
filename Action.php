@@ -18,15 +18,21 @@ require_once dirname(__FILE__) . '/Providers.php';
  *   voices  拉取当前服务商的可用音色
  *   health  当前服务商的连通性/鉴权自检
  *
- * 1.6.0 起具体的 TTS 调用下沉到 Providers.php（TtsVoice_Provider::make()），
+ * 具体的 TTS 调用下沉到 Providers.php（TtsVoice_Provider_OpenAI），
  * 本类只负责鉴权、CSRF、取正文、文本清洗、任务读写与 JSON/状态码输出。
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.0
+ * @version 1.7.1
  */
 class TtsVoice_Action extends Typecho_Widget
 {
+    /**
+     * 任务允许停留在 queued/running/done 的最长时间（秒）
+     *
+     * 超过就判失败：正常情况下 65 分钟音频约 40 分钟跑完，6 小时足够覆盖长文 + 主机排队。
+     */
+    const MAX_JOB_AGE = 21600;
     /**
      * Widget 初始化
      *
@@ -179,68 +185,30 @@ class TtsVoice_Action extends Typecho_Widget
 
         $provider = $this->provider();
 
-        // 只有异步型才有「排队中」概念；同步型每次提交都应重新生成
-        if ($provider->isAsync()) {
-            $existing = TtsVoice_Plugin::job($cid);
+        // 同一篇已经排队/在跑/正在下载 → 直接复用，避免重复占用 GPU
+        $existing = TtsVoice_Plugin::job($cid);
 
-            if ($existing && in_array($existing['status'], array('queued', 'running', 'done'), true)) {
-                return $this->json(array(
-                    'cid'     => $cid,
-                    'status'  => $existing['status'],
-                    'reused'  => true,
-                    'jobId'   => $existing['job_id'],
-                ), 0, '任务已在进行中');
-            }
+        if ($existing && in_array($existing['status'], array('queued', 'running', 'done'), true)) {
+            return $this->json(array(
+                'cid'     => $cid,
+                'status'  => $existing['status'],
+                'reused'  => true,
+                'jobId'   => $existing['job_id'],
+            ), 0, '任务已在进行中');
         }
 
-        // 第 4 个参数是原始 Markdown（同步型据此定位章节起点；异步型忽略）
+        // submit() 内部已经落库（job_id / voice / progress），这里不再重复写
         $result = $provider->submit($cid, $title, $text, $source);
 
         if (empty($result['ok'])) {
-            // 不写「NAS」：现在的服务商可能是自建 Qwen3-TTS / Azure / OpenAI，用中性文案
             return $this->json(array(), 502, '提交失败：' . (isset($result['error']) ? $result['error'] : '未知错误'));
         }
 
-        if ($provider->isAsync()) {
-            $jobId  = (string) $result['jobId'];
-            $status = '' === (string) $result['status'] ? 'queued' : (string) $result['status'];
-
-            /*
-             * 【不要在这里再落一次库】异步任务（Qwen3-TTS）的 submit() 已经自己写好了
-             * job 行（job_id、voice 标签、progress 0/N）。以前不分服务商统一再写一次，
-             * 把 voice 覆盖成本地音色名、progress 冲成 0/0 ——
-             * 历史上 cid=612/682 那种脏行就是这么来的。
-             * （1.6.8 起 tts-worker(local) 已移除，这里不再需要任何服务商特判。）
-             */
-
-            return $this->json(array(
-                'cid'    => $cid,
-                'jobId'  => $jobId,
-                'status' => $status,
-            ), 0, '已提交，正在合成');
-        }
-
-        // 同步型：provider 已落库；这里按返回值再对齐一次，避免半途异常导致状态不一致
-        TtsVoice_Plugin::saveJob($cid, array(
-            'job_id'   => '',
-            'status'   => '' === (string) $result['status'] ? 'ready' : (string) $result['status'],
-            'title'    => $title,
-            'voice'    => (string) $result['voice'],
-            'speed'    => '',
-            'progress' => (string) $result['progress'],
-            'duration' => (string) $result['duration'],
-            'size'     => intval($result['size']),
-            'chapters' => $result['chapters'],
-            'audio'    => (string) $result['audio'],
-            'error'    => '',
-        ));
-
         return $this->json(array(
-            'cid'      => $cid,
-            'status'   => (string) $result['status'],
-            'audio'    => (string) $result['audio'],
-            'provider' => $provider->id(),
-        ), 0, '合成完成，已就绪');
+            'cid'    => $cid,
+            'jobId'  => (string) $result['jobId'],
+            'status' => '' === (string) $result['status'] ? 'queued' : (string) $result['status'],
+        ), 0, '已提交，正在合成');
     }
 
     /**
@@ -383,7 +351,6 @@ class TtsVoice_Action extends Typecho_Widget
         return $this->json(array(
             'voices'   => $result['voices'],
             'note'     => isset($result['note']) ? (string) $result['note'] : '',
-            'provider' => $provider->id(),
         ));
     }
 
@@ -406,15 +373,13 @@ class TtsVoice_Action extends Typecho_Widget
                 'ok'       => false,
                 'error'    => (string) $result['error'],
                 'ms'       => intval($result['ms']),
-                'provider' => $provider->id(),
-            ), 502, '无法连接服务：' . (string) $result['error']);
+                ), 502, '无法连接服务：' . (string) $result['error']);
         }
 
         return $this->json(array(
             'ok'       => true,
             'ms'       => intval($result['ms']),
             'nas'      => $result['data'],
-            'provider' => $provider->id(),
         ), 0, '连接正常');
     }
 
@@ -453,13 +418,13 @@ class TtsVoice_Action extends Typecho_Widget
     /* ================================================================== */
 
     /**
-     * 当前服务商
+     * 当前服务商（只剩自建 Qwen3-TTS 一条路）
      *
-     * @return TtsVoice_Provider
+     * @return TtsVoice_Provider_OpenAI
      */
     protected function provider()
     {
-        return TtsVoice_Provider::make(TtsVoice_Plugin::opt('provider', 'openai'));
+        return new TtsVoice_Provider_OpenAI();
     }
 
     /**
@@ -677,6 +642,24 @@ class TtsVoice_Action extends Typecho_Widget
 
         $provider = $this->provider();
 
+        /*
+         * 【超时兜底】远端任务如果一直查不到结果（反代 502、接收端异常、任务被清），
+         * 以前本地会永远停在 queued/running，前端无限轮询、用户也没法重新生成。
+         * 规则：中间态 + 超过 MAX_JOB_AGE 没有任何更新 → 判失败，让用户重生成。
+         */
+        $status = (string) $job['status'];
+        $age    = time() - intval($job['updated']);
+
+        if (in_array($status, array('queued', 'running', 'done'), true) && $age > self::MAX_JOB_AGE) {
+            TtsVoice_Plugin::saveJob($cid, array(
+                'status' => 'failed',
+                'error'  => '任务超时：超过 ' . round(self::MAX_JOB_AGE / 3600, 1) . ' 小时没有进展，'
+                            . '请检查 TTS 主机后重新生成',
+            ));
+
+            return TtsVoice_Plugin::job($cid);
+        }
+
         try {
             $patch = $provider->poll($job);
         } catch (Throwable $e) {
@@ -684,13 +667,27 @@ class TtsVoice_Action extends Typecho_Widget
             return $job;
         }
 
-        if (is_array($patch) && !empty($patch)) {
-            TtsVoice_Plugin::saveJob($cid, $patch);
+        if (!is_array($patch) || empty($patch)) {
+            return $job;
+        }
 
+        $cleanup = isset($patch['cleanup']) ? (string) $patch['cleanup'] : '';
+        unset($patch['cleanup']);
+
+        if (!TtsVoice_Plugin::saveJob($cid, $patch)) {
+            // 落库失败就不删远端产物：下一拍还能重试，音频不会丢
             return TtsVoice_Plugin::job($cid);
         }
 
-        return $job;
+        if ('' !== $cleanup) {
+            try {
+                $provider->cleanup($cleanup);
+            } catch (Throwable $e) {
+                // 清理是 best effort
+            }
+        }
+
+        return TtsVoice_Plugin::job($cid);
     }
 
     /* ================================================================== */
