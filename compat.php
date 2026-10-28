@@ -23,11 +23,20 @@ if (defined('TTSVOICE_COMPAT_LOADED')) {
 
 define('TTSVOICE_COMPAT_LOADED', true);
 
-if (!class_exists('Helper', false) && class_exists('Utils\\Helper')) {
+/*
+ * 【注意顺序】必须先让核心加载真正的类（`Utils\Helper` / `Typecho\Plugin\PluginInterface`），
+ * 核心的 autoloader 在加载时**自己就会**建好下划线别名；加载完再判断别名是否已经存在，
+ * 否则 `class_alias()` 会因为「名字已被占用」抛 Warning：
+ *   Cannot declare class Helper, because the name is already in use
+ */
+class_exists('Utils\\Helper');
+interface_exists('Typecho\\Plugin\\PluginInterface');
+
+if (!class_exists('Helper', false)) {
     class_alias('Utils\\Helper', 'Helper');
 }
 
-if (!interface_exists('Typecho_Plugin_Interface', false) && interface_exists('Typecho\\Plugin\\PluginInterface')) {
+if (!interface_exists('Typecho_Plugin_Interface', false)) {
     class_alias('Typecho\\Plugin\\PluginInterface', 'Typecho_Plugin_Interface');
 }
 
