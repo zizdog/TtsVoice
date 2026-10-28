@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.9
+ * @version 1.7.10
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.7.9';
+        const VERSION = '1.7.10';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -299,7 +299,7 @@ namespace {
                 . 'var d=document.createElement("details");'
                 . 'd.className="ttsv-adv";'
                 . 'var sm=document.createElement("summary");'
-                . 'sm.textContent="高级设置（音色 / 样本 / 格式 / 语速）";'
+                . 'sm.textContent="高级设置（音色样本 / 输出格式 / 语速）";'
                 . 'd.appendChild(sm);'
                 . 'var body=document.createElement("div");'
                 . 'body.className="ttsv-adv-body";'
@@ -540,7 +540,7 @@ namespace {
             );
             $form->addInput($keep);
 
-            // ---- ④ 高级设置（默认折叠：音色 / 样本 / 输出格式 / 语速）----
+            // ---- ④ 高级设置（默认折叠：音色样本 / 输出格式 / 语速）----
             // 这里只放控件；折叠由 advancedScript() 里那段 JS 把它们搬进 <details>。
             $voiceLayout = self::layoutClass();
 
