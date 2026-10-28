@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.5
+ * @version 1.7.6
  */
 class TtsVoice_Action extends Typecho_Widget
 {
@@ -563,9 +563,16 @@ class TtsVoice_Action extends Typecho_Widget
             return $this->json(array(), 500, '删除失败：' . $file);
         }
 
-        // 【连带清掉路径配置】样本没了，路径留着只会让状态变得含糊。
-        // 清掉后 hasCloneVoice() 立刻为 false —— 而样本是**唯一的音色来源**，
-        // 所以此后「生成」会被直接拒绝，直到重新上传样本为止。
+        /*
+         * 【只删本站本机】
+         *   1. 删 usr/uploads/tts/.voice/ref.wav（网站本机文件）
+         *   2. 清空 refAudioPath（不再把主机上的旧样本发给接收端）
+         * 不调用接收端的 DELETE /voice/sources —— 所以：
+         *   · 主机内置默认音色（<dir>/default/ref.wav）不会被动到
+         *   · 其他站点（其他 refSourceId）的样本也不会被动到
+         *   · 本站之前推到主机的那个来源目录会**保留**（成为孤儿，但不再被引用）
+         * 清空 refAudioPath 后，提交不带 ref_audio，接收端回落 default 音色。
+         */
         TtsVoice_Plugin::saveSettings(array('refAudioPath' => ''));
 
         return $this->json(array(

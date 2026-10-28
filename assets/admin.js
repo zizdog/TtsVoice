@@ -1065,7 +1065,7 @@
 
         if (clearBtn) {
             clearBtn.addEventListener('click', function () {
-                if (!window.confirm('确定删除音色样本？\n删除后提交会改用 TTS 主机的默认音色（已上传到主机的样本也会被清掉）。')) {
+                if (!window.confirm('确定删除本站的音色样本？\n\n只删「网站本机」的样本文件（并清空已推送路径）。\nTTS 主机的默认音色、以及其他站点的样本都不会被动到。')) {
                     return;
                 }
 

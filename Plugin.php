@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.5
+ * @version 1.7.6
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.7.5';
+        const VERSION = '1.7.6';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';

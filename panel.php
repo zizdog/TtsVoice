@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.5
+ * @version 1.7.6
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
@@ -254,7 +254,7 @@ if ('doctor' === $panelAction) {
                             <button type="button" class="btn primary" id="ttsv-voice-upload"><?php _e('上传样本'); ?></button>
                             <?php if ($hasRef) { ?>
                                 <button type="button" class="btn" id="ttsv-voice-play"><?php _e('▶ 试听'); ?></button>
-                                <button type="button" class="btn" id="ttsv-voice-clear"><?php _e('删除'); ?></button>
+                                <button type="button" class="btn" id="ttsv-voice-clear" title="<?php _e('只删除网站本机的样本；不影响 TTS 主机的默认音色，也不影响其他站点'); ?>"><?php _e('删除'); ?></button>
                                 <?php if ('' !== $recvUrl) { ?>
                                     <button type="button" class="btn" id="ttsv-voice-sync"><?php _e('重新同步'); ?></button>
                                 <?php } ?>
@@ -776,7 +776,7 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
     var voiceClear = document.getElementById('ttsv-voice-clear');
     if (voiceClear) {
         voiceClear.addEventListener('click', function () {
-            if (!window.confirm('确定删除当前音色样本？\n删除后提交会改用 TTS 主机的默认音色。')) {
+            if (!window.confirm('确定删除本站的音色样本？\n\n只删「网站本机」的样本文件（并清空已推送路径）。\nTTS 主机的默认音色、以及其他站点的样本都不会被动到。')) {
                 return;
             }
 
