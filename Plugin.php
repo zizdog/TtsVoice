@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.8
+ * @version 1.7.9
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.7.8';
+        const VERSION = '1.7.9';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -291,10 +291,9 @@ namespace {
                 . '}'
                 . 'function buildAdv(){'
                 . 'if(document.querySelector(".ttsv-adv")){return;}'
-                . 'var vs=document.getElementById("ttsv-vs");'
                 . 'var vp=document.getElementById("ttsv-vp");'
                 . 'var first=row(ADV[0]);'
-                . 'var anchor=(vs&&vs.parentNode)?vs:((vp&&vp.parentNode)?vp:first);'
+                . 'var anchor=(vp&&vp.parentNode)?vp:first;'
                 . 'if(!anchor||!anchor.parentNode){return;}'
                 . 'var host=anchor.parentNode;'
                 . 'var d=document.createElement("details");'
@@ -306,7 +305,6 @@ namespace {
                 . 'body.className="ttsv-adv-body";'
                 . 'd.appendChild(body);'
                 . 'host.insertBefore(d,anchor);'
-                . 'if(vs){body.appendChild(vs);}'
                 . 'if(vp){body.appendChild(vp);}'
                 . 'for(var i=0;i<ADV.length;i++){var r=row(ADV[i]);if(r){body.appendChild(r);}}'
                 . '}'
@@ -426,7 +424,20 @@ namespace {
             );
             $form->addInput($chunk);
 
-            // ---- ④ 通用设置（分隔线）----
+            // ---- ④ 音色（多音色：内置 / 我的音色 / 我上传的）----
+            $voiceLayout = self::layoutClass();
+
+            if ('' !== $voiceLayout) {
+                try {
+                    $select = new $voiceLayout();
+                    $select->html(self::voiceSelectHtml());
+                    $form->addItem($select);
+                } catch (Throwable $e) {
+                    // 布局类不可用时忽略
+                }
+            }
+
+            // ---- ⑤ 通用设置（分隔线）----
             $sepLayout = self::layoutClass();
 
             if ('' !== $sepLayout) {
@@ -532,16 +543,6 @@ namespace {
             // ---- ④ 高级设置（默认折叠：音色 / 样本 / 输出格式 / 语速）----
             // 这里只放控件；折叠由 advancedScript() 里那段 JS 把它们搬进 <details>。
             $voiceLayout = self::layoutClass();
-
-            if ('' !== $voiceLayout) {
-                try {
-                    $select = new $voiceLayout();
-                    $select->html(self::voiceSelectHtml());
-                    $form->addItem($select);
-                } catch (Throwable $e) {
-                    // 布局类不可用时忽略
-                }
-            }
 
             if ('' !== $voiceLayout) {
                 try {
