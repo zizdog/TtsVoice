@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.11
+ * @version 1.7.0
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -1136,6 +1136,136 @@ if (!class_exists('TtsVoice_Provider', false)) {
 
             return round(intval($bytes) * 8 / ($kbps * 1000), 3);
         }
+
+        /**
+         * 一块文本要多少 max_tokens
+         *
+         * 标定见基类常量：`max(400, 字数 × 10)`。
+         * 网站与 TTS 主机两侧必须用同一个公式，否则退化判定和截断行为会对不上。
+         *
+         * 【2026-10-28 从 OpenAI 子类上移】Azure 的 synthesizeAll() 也要用它。
+         *
+         * @param string $text
+         * @return int
+         */
+        protected function maxTokensFor($text)
+        {
+            $chars = function_exists('mb_strlen')
+                ? mb_strlen((string) $text, 'UTF-8')
+                : strlen((string) $text);
+
+            return max(self::MIN_MAX_TOKENS, (int) ceil($chars * self::TOKENS_PER_CHAR));
+        }
+
+        /**
+         * 按实际字节判断容器格式
+         *
+         * 【为什么需要】接收端如果还没升级（v1.3.0 只吐 mp3），而网站配置成了 wav，
+         * 就会把 mp3 字节写进 `.wav` 文件 —— 后缀和内容不一致，播放器可能不认，
+         * 章节时长也会按 48000 B/s 算错。所以收尾时一律以**真实字节**为准。
+         *
+         * 【2026-10-28 从 OpenAI 子类上移】Azure 的 synthesizeAll() 也要用它。
+         *
+         * @param string $data
+         * @return string wav | mp3
+         */
+        protected function sniffExtension($data)
+        {
+            $data = (string) $data;
+
+            if (strlen($data) >= 12 && 'RIFF' === substr($data, 0, 4) && 'WAVE' === substr($data, 8, 4)) {
+                return 'wav';
+            }
+
+            return 'mp3';
+        }
+
+        /**
+         * 合成一块：退化检测 + 自动重试
+         *
+         * 【为什么会退化】模型有个确定性的失败模式：一直生成静音 token 直到把
+         * max_tokens 用尽。随机采样只是**有时能逃出来**（实测约 2/3），
+         * 所以重试是有效的；而 temperature=0（贪心解码）每次都会掉进去，绝不能设。
+         *
+         * 【判据为什么可靠】退化输出的时长**正好**等于 max_tokens × 0.08 秒
+         * （12.5 token/秒），不是「超过某个经验值」，而是撞到硬上限 —— 几乎不会误判。
+         *
+         * 【2026-10-28 从 OpenAI 子类上移，修 Azure 必崩】
+         * 这个方法原来只定义在 TtsVoice_Provider_OpenAI 里，但 Azure 的
+         * synthesizeAll() 一直在调 `$this->synthesizeChunk()` —— 于是只要把
+         * 「TTS 服务」切到 Azure，点生成就是
+         * `Error: Call to undefined method TtsVoice_Provider_Azure::synthesizeChunk()`（HTTP 500），
+         * 而 Doctor 的 Azure 自检走的是 health() → synthesize()，照样显示绿。
+         * 两个服务商都需要的逻辑，放基类才对。
+         *
+         * @param string $text
+         * @return array {ok, error, audio(已去 ID3), seconds, attempts, degenerate}
+         */
+        protected function synthesizeChunk($text)
+        {
+            // 与提交给 TTS 主机队列的 max_tokens 用同一个公式（maxTokensFor）
+            $maxTokens  = $this->maxTokensFor($text);
+            $capSeconds = $maxTokens * self::SECONDS_PER_TOKEN;
+            $kbps = $this->bitrateKbps($this->outputFormatForBitrate(), 128);
+
+            $lastError = '';
+            $attempt = 0;
+
+            while ($attempt < self::SYNTH_ATTEMPTS) {
+                $attempt++;
+
+                $result = $this->synthesize($text, $maxTokens);
+
+                if (empty($result['ok'])) {
+                    $lastError = isset($result['error']) ? (string) $result['error'] : '未知错误';
+
+                    // 鉴权/配置类错误重试也没用，直接退出
+                    if (false !== strpos($lastError, '鉴权失败')) {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                $clean = $this->stripId3($result['audio']);
+
+                if ('' === $clean) {
+                    $lastError = '音频为空';
+                    continue;
+                }
+
+                $seconds = $this->estimateDuration(strlen($clean), $kbps, $this->sniffExtension($clean));
+
+                if ($seconds >= $capSeconds * self::DEGENERATE_RATIO) {
+                    // 顶到上限 → 判定退化（整段静音），换一次采样重来
+                    $lastError = '输出退化（' . round($seconds) . ' 秒，顶到 ' . round($capSeconds) . ' 秒上限）';
+                    continue;
+                }
+
+                return array(
+                    'ok'         => true,
+                    'error'      => '',
+                    'audio'      => $clean,
+                    'seconds'    => $seconds,
+                    'attempts'   => $attempt,
+                    'degenerate' => false,
+                    // 接收端 v1.2.0+ 的 X-TtsVoice-Model-Cold（本次是否冷加载）
+                    'cold'       => !empty($result['cold']),
+                    // 服务端编不出设置里的格式、自动退回 WAV 时的说明（见 synthesize()）
+                    'notice'     => isset($result['notice']) ? (string) $result['notice'] : '',
+                );
+            }
+
+            return array(
+                'ok'         => false,
+                'error'      => ('' === $lastError ? '未知错误' : $lastError)
+                                . '（已重试 ' . $attempt . ' 次）',
+                'audio'      => '',
+                'seconds'    => 0,
+                'attempts'   => $attempt,
+                'degenerate' => true,
+            );
+        }
     }
 
     /**
@@ -1696,27 +1826,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
             }
 
             return $out;
-        }
-
-        /**
-         * 按实际字节判断容器格式
-         *
-         * 【为什么需要】接收端如果还没升级（v1.3.0 只吐 mp3），而网站配置成了 wav，
-         * 就会把 mp3 字节写进 `.wav` 文件 —— 后缀和内容不一致，播放器可能不认，
-         * 章节时长也会按 48000 B/s 算错。所以收尾时一律以**真实字节**为准。
-         *
-         * @param string $data
-         * @return string wav | mp3
-         */
-        protected function sniffExtension($data)
-        {
-            $data = (string) $data;
-
-            if (strlen($data) >= 12 && 'RIFF' === substr($data, 0, 4) && 'WAVE' === substr($data, 8, 4)) {
-                return 'wav';
-            }
-
-            return 'mp3';
         }
 
         /**
@@ -2518,24 +2627,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /**
-         * 一块文本要多少 max_tokens
-         *
-         * 标定见基类常量：`max(400, 字数 × 10)`。
-         * 网站与 TTS 主机两侧必须用同一个公式，否则退化判定和截断行为会对不上。
-         *
-         * @param string $text
-         * @return int
-         */
-        protected function maxTokensFor($text)
-        {
-            $chars = function_exists('mb_strlen')
-                ? mb_strlen((string) $text, 'UTF-8')
-                : strlen((string) $text);
-
-            return max(self::MIN_MAX_TOKENS, (int) ceil($chars * self::TOKENS_PER_CHAR));
-        }
-
-        /**
          * 查一次远端任务状态；就绪则下载收尾
          *
          * 【为什么不在这里合成】合成已经在 TTS 主机上跑了。这里只做「查 + 下载」，
@@ -3001,85 +3092,6 @@ if (!class_exists('TtsVoice_Provider', false)) {
             }
 
             return !in_array($value, array('0', 'false', 'no', 'off'), true);
-        }
-
-        /**
-         * 合成一块，带「退化检测 + 重试」
-         *
-         * 【为什么会退化】模型有个确定性的失败模式：一直生成静音 token 直到把
-         * max_tokens 用尽。随机采样只是**有时能逃出来**（实测约 2/3），
-         * 所以重试是有效的；而 temperature=0（贪心解码）每次都会掉进去，绝不能设。
-         *
-         * 【判据为什么可靠】退化输出的时长**正好**等于 max_tokens × 0.08 秒
-         * （12.5 token/秒），不是「超过某个经验值」，而是撞到硬上限 —— 几乎不会误判。
-         *
-         * @param string $text
-         * @return array {ok, error, audio(已去 ID3), seconds, attempts, degenerate}
-         */
-        protected function synthesizeChunk($text)
-        {
-            // 与提交给 TTS 主机队列的 max_tokens 用同一个公式（maxTokensFor）
-            $maxTokens  = $this->maxTokensFor($text);
-            $capSeconds = $maxTokens * self::SECONDS_PER_TOKEN;
-            $kbps = $this->bitrateKbps($this->outputFormatForBitrate(), 128);
-
-            $lastError = '';
-            $attempt = 0;
-
-            while ($attempt < self::SYNTH_ATTEMPTS) {
-                $attempt++;
-
-                $result = $this->synthesize($text, $maxTokens);
-
-                if (empty($result['ok'])) {
-                    $lastError = isset($result['error']) ? (string) $result['error'] : '未知错误';
-
-                    // 鉴权/配置类错误重试也没用，直接退出
-                    if (false !== strpos($lastError, '鉴权失败')) {
-                        break;
-                    }
-
-                    continue;
-                }
-
-                $clean = $this->stripId3($result['audio']);
-
-                if ('' === $clean) {
-                    $lastError = '音频为空';
-                    continue;
-                }
-
-                $seconds = $this->estimateDuration(strlen($clean), $kbps, $this->sniffExtension($clean));
-
-                if ($seconds >= $capSeconds * self::DEGENERATE_RATIO) {
-                    // 顶到上限 → 判定退化（整段静音），换一次采样重来
-                    $lastError = '输出退化（' . round($seconds) . ' 秒，顶到 ' . round($capSeconds) . ' 秒上限）';
-                    continue;
-                }
-
-                return array(
-                    'ok'         => true,
-                    'error'      => '',
-                    'audio'      => $clean,
-                    'seconds'    => $seconds,
-                    'attempts'   => $attempt,
-                    'degenerate' => false,
-                    // 接收端 v1.2.0+ 的 X-TtsVoice-Model-Cold（本次是否冷加载）
-                    'cold'       => !empty($result['cold']),
-                    // 服务端编不出设置里的格式、自动退回 WAV 时的说明（见 synthesize()）
-                    'notice'     => isset($result['notice']) ? (string) $result['notice'] : '',
-                );
-            }
-
-            return array(
-                'ok'         => false,
-                'error'      => ('' === $lastError ? '未知错误' : $lastError)
-                                . '（已重试 ' . $attempt . ' 次）',
-                'audio'      => '',
-                'seconds'    => 0,
-                'attempts'   => $attempt,
-                'degenerate' => true,
-            );
         }
 
         /**

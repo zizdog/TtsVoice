@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.11
+ * @version 1.7.0
  * @link    https://zizdog.com
  */
 
@@ -26,7 +26,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.6.11';
+        const VERSION = '1.7.0';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -437,15 +437,22 @@ namespace {
 
             /*
              * 【自愈】分块方式的默认值 1.6.8 起由「按段落」改为「按字数」。
-             * 老站点库里若还停在旧默认（paragraph），这里跟着换过来 —— 否则用户会看到
-             * 设置页选着「按段落」，以为新默认没生效。（想用回按段落，在设置页点一下即可。）
+             * 老站点库里若还停在旧默认（paragraph），这里跟着换过来。
+             *
+             * ⚠️ 2026-10-28 修：以前是**每次打开设置页**都无条件写回 chars，
+             * 导致用户主动选「按段落」保存后，下次进来又被改掉 —— 这个选项等于不可用。
+             * 现在用 chunkModeMigrated 标记，只迁移一次；之后完全尊重用户选择。
              */
             $liveFix = array();
 
-            if ('paragraph' === trim((string) self::opt('chunkMode', 'chars'))) {
+            if ('0' === (string) self::opt('chunkModeMigrated', '0')) {
                 try {
-                    self::saveSettings(array('chunkMode' => 'chars'));
-                    $liveFix['chunkMode'] = 'chars';
+                    self::saveSettings(array(
+                        'chunkMode'         => 'chars',
+                        'chunkModeMigrated' => '1',
+                    ));
+                    $liveFix['chunkMode']         = 'chars';
+                    $liveFix['chunkModeMigrated'] = '1';
                 } catch (Throwable $e) {
                     // 存不进去也不影响渲染
                 }
@@ -514,9 +521,9 @@ namespace {
             $chunk = new $clsText(
                 'chunkChars',
                 NULL,
-                '200',
+                self::defaults()['chunkChars'],
                 _t('分块长度（字符）'),
-                _t('单块上限字符数，超出会在句末标点处再切。留空或 0 用默认 <b>200</b>；Qwen 常用 <b>100~200</b>。')
+                _t('单块上限字符数，超出会在句末标点处再切。留空或 0 用默认 <b>120</b>；Qwen 常用 <b>100~200</b>。')
             );
             $form->addInput($chunk);
 
@@ -678,7 +685,7 @@ namespace {
             $timeout = new $clsText(
                 'timeout',
                 NULL,
-                '15',
+                self::defaults()['timeout'],
                 _t('请求超时（秒）'),
                 _t('访问 TTS 服务的连接超时，公网 / 反向代理建议 <b>15~60</b>；合成单块时按它的 4 倍放宽。')
             );
@@ -736,7 +743,7 @@ namespace {
             $openaiFormat = new $clsText(
                 'openaiFormat',
                 NULL,
-                'mp3',
+                self::defaults()['openaiFormat'],
                 _t('输出格式'),
                 _t('<code>wav</code>：24kHz 单声道无损（约 48 KB/s）；<code>mp3</code>：体积约 1/3，兼容性最好。'
                     . '服务端没装 ffmpeg 时会自动按 wav 出片。')
@@ -747,7 +754,7 @@ namespace {
             $openaiSpeed = new $clsText(
                 'openaiSpeed',
                 NULL,
-                '1',
+                self::defaults()['openaiSpeed'],
                 _t('语速'),
                 _t('合成后用本机 ffmpeg 变速（不改音高）。<code>1.0</code> = 原速，<code>1.25</code> = 快 25%。')
             );
@@ -828,10 +835,34 @@ namespace {
          * 自动保存链路在本环境不可用，所以主动接管。
          *
          * @param array $settings
+         * @param bool  $isInit   核心启用插件时的初始化调用（此时 $settings 全是表单默认值）
          * @return void
          */
-        public static function configHandle($settings)
+        public static function configHandle($settings, $isInit = false)
         {
+            /*
+             * 【启用时的第二次调用 —— 2026-10-28 修】
+             *
+             * Typecho 1.3 的 Edit::activate() 在插件 activate() 之后，还会：
+             *   config($form) → $form->getValues() → configHandle($settings, true)
+             * 而 config() 只创建「带表单默认值」的控件、不回填库值，
+             * 所以那份 $settings 是 200/15/mp3/1 之类的**默认值**。
+             *
+             * 以前直接 saveSettings($settings)，把 activate() 里刚恢复的备份整份覆盖：
+             * 停用→启用一次，Qwen Key 清空、地址回到 127.0.0.1:8894、refSourceId/模型也被抹掉，
+             * 而提示还写着「已恢复停用前的设置」。
+             *
+             * 现在初始化调用只做「补缺失键」，已有值一律保留。
+             */
+            if ($isInit) {
+                $current = self::rawConfig();
+                $merged  = array_merge(self::defaults(), is_array($current) ? $current : array());
+
+                self::saveSettings($merged);
+
+                return;
+            }
+
             // 配置保存时的清洗
             if (is_array($settings)) {
                 // 目标 id：允许用户写 #id，统一去掉 #；只保留
@@ -913,6 +944,18 @@ namespace {
             $merged['configSavedAt'] = (string) time();
 
             $value  = serialize($merged);
+
+            /*
+             * ---- 0. 真 upsert ----
+             * 配置行可能还不存在（刚激活 / 恢复备份时被核心删过），这时只走 UPDATE 会
+             * 「影响 0 行 + verifySaved 失败」，三层降级全部静默失败。
+             * saveOptionRow() 是先查后 update-or-insert，这里先做一次。
+             */
+            if (self::saveOptionRow($name, $value) && self::verifySaved($value)) {
+                self::resetOptCache();
+
+                return true;
+            }
 
             // ---- 1. Db 构造器 ----
             try {
@@ -1026,6 +1069,9 @@ namespace {
                 'provider'     => 'openai',
                 // 分块方式：chars(按字数，默认) | paragraph(按段落/标题)
                 'chunkMode'    => 'chars',
+                // 一次性迁移标记：1.6.8 把默认从 paragraph 改成 chars 后，
+                // 旧库需要迁移一次；迁完就不再覆盖用户后来主动选的 paragraph。
+                'chunkModeMigrated' => '0',
                 // 120 字 ≈ 27 秒。自建 TTS 约 4.5 字/秒，必须让「一次请求」
                 // 落在 nginx 默认的 60 秒 FastCGI 超时内，否则会被网关掐断。
                 'chunkChars'   => '120',
@@ -1236,7 +1282,19 @@ namespace {
                     return NULL;
                 }
 
-                $data = @unserialize($row['value']);
+                $raw  = (string) $row['value'];
+                $data = @unserialize($raw);
+
+                /*
+                 * 兼容两种格式：插件自己写的是 serialize()，而核心 Helper::configPlugin()
+                 * 写的是 JSON（见 var/Widget/Plugins/Edit.php::configPlugin）。
+                 * 核心的 Options::tryDeserialize() 两种都认，这里必须保持一致 ——
+                 * 否则「恢复备份」用核心写完 JSON 后，备份额外的 prune/verify 全都读不到配置。
+                 */
+                if (!is_array($data)) {
+                    $json = json_decode($raw, true);
+                    $data = is_array($json) ? $json : NULL;
+                }
 
                 return is_array($data) ? $data : NULL;
             } catch (Throwable $e) {

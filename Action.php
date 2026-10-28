@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.6.11
+ * @version 1.7.0
  */
 class TtsVoice_Action extends Typecho_Widget
 {
@@ -88,7 +88,14 @@ class TtsVoice_Action extends Typecho_Widget
             @session_write_close();
         }
 
-        switch ($do) {
+        /*
+         * 兜住所有服务商实现里的 Error/Exception（例如「调用了不存在的方法」）。
+         * 以前没有任何 try/catch：一个 fatal 就输出 PHP 错误页/白屏，
+         * 前端只会看到「服务器返回异常」，日志里也定位不到是哪个动作。
+         * 这里统一转成 502 JSON（不把文件路径/堆栈吐给浏览器）。
+         */
+        try {
+            switch ($do) {
             case 'submit':
                 return $this->actSubmit();
 
@@ -121,6 +128,9 @@ class TtsVoice_Action extends Typecho_Widget
 
             case 'voice':
                 return $this->actVoice();
+            }
+        } catch (Throwable $e) {
+            return $this->json(array(), 502, '服务端异常（' . get_class($e) . '），请重试；详细原因见 PHP 错误日志');
         }
 
         return $this->json(array(), 404, '接口不存在：' . $do);
