@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.1
+ * @version 1.7.2
  */
 class TtsVoice_Doctor
 {

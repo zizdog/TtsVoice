@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.1
+ * @version 1.7.2
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -955,6 +955,28 @@ if (!class_exists('TtsVoice_Provider', false)) {
                     }
                 }
             }
+        }
+
+        /**
+         * 提交/合成失败的统一返回结构
+         *
+         * @param string $error
+         * @return array
+         */
+        protected function fail($error)
+        {
+            return array(
+                'ok'       => false,
+                'error'    => (string) $error,
+                'jobId'    => '',
+                'status'   => 'failed',
+                'audio'    => '',
+                'duration' => 0,
+                'size'     => 0,
+                'chapters' => array(),
+                'progress' => '',
+                'voice'    => '',
+            );
         }
 
         /**
