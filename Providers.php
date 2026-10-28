@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.4
+ * @version 1.7.5
  */
 
 require_once dirname(__FILE__) . '/compat.php';
@@ -1381,21 +1381,65 @@ if (!class_exists('TtsVoice_Provider', false)) {
         }
 
         /**
-         * 可用音色列表
+         * 可用音色（只列「服务器默认」和「你自己的样本」）
          *
-         * 自建 Qwen3-TTS 没有「预置音色列表」：主机已内置默认音色，
-         * 上传样本则用样本克隆。
+         * 接收端的 `/voice/sources` 会列出**所有**来源（多站点共用一台主机时包含别人的），
+         * 面板只该看到与自己相关的两项：内置 default + 本插件的 refSourceId。
          *
-         * @return array
+         * @return array {ok, error, voices, note}
          */
         public function voices()
         {
+            $own      = trim((string) TtsVoice_Plugin::refSourceId());
+            $response = $this->receiverRequest('GET', '/voice/sources', NULL, 8);
+
+            if (NULL === $response) {
+                return array('ok' => false, 'error' => '未配置接收端地址（openaiBaseUrl 为空或不是 http(s)）', 'voices' => array(), 'note' => '');
+            }
+
+            if (!$response['ok']) {
+                return array('ok' => false, 'error' => (string) $response['error'], 'voices' => array(), 'note' => '');
+            }
+
+            if (200 !== $response['code']) {
+                return array(
+                    'ok'     => false,
+                    'error'  => 'HTTP ' . $response['code'] . '：' . $this->receiverError($response),
+                    'voices' => array(),
+                    'note'   => '',
+                );
+            }
+
+            $json = json_decode((string) $response['body'], true);
+
+            if (!is_array($json) || empty($json['ok'])) {
+                return array('ok' => false, 'error' => '接收端返回的不是有效 JSON', 'voices' => array(), 'note' => '');
+            }
+
+            $sources = (isset($json['sources']) && is_array($json['sources'])) ? $json['sources'] : array();
+            $voices  = array();
+
+            foreach ($sources as $item) {
+                $src = (string) (isset($item['source']) ? $item['source'] : '');
+                $sec = round(floatval(isset($item['duration']) ? $item['duration'] : 0), 1);
+                $tag = $sec > 0 ? '（' . $sec . ' 秒）' : '';
+
+                if ('default' === $src) {
+                    $voices[] = '服务器默认音色' . $tag;
+                } elseif ('' !== $own && $src === $own) {
+                    $voices[] = '我的样本' . $tag;
+                }
+            }
+
+            if (empty($voices)) {
+                $voices[] = '服务器默认音色（内置）';
+            }
+
             return array(
                 'ok'     => true,
                 'error'  => '',
-                'voices' => array(),
-                'note'   => 'TTS 主机已内置默认音色 —— 不上传样本也能直接生成；'
-                            . '想用自己的声音，可在面板上传一段 10 秒以上的人声做克隆。',
+                'voices' => $voices,
+                'note'   => '只显示服务器默认音色和你上传的样本',
             );
         }
 

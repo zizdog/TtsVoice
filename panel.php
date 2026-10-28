@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.4
+ * @version 1.7.5
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
@@ -194,19 +194,13 @@ if ('doctor' === $panelAction) {
         </div>
 
         <div class="ttsv-head">
-            <span class="ttsv-head-item">
-                <?php
-                // 1.6.0：显示当前 TTS 服务与目标地址
-                $ttsvProvider = class_exists('TtsVoice_Provider_OpenAI', false)
-                    ? new TtsVoice_Provider_OpenAI()
-                    : NULL;
-                $ttsvEndpoint = $ttsvProvider ? $ttsvProvider->endpoint() : '';
-                ?>
-                <?php _e('服务：'); ?>
-                <code><?php echo ttsv_esc($ttsvProvider ? $ttsvProvider->label() : 'openai'); ?></code>
-                <?php _e('地址：'); ?>
-                <code><?php echo ttsv_esc($ttsvEndpoint); ?></code>
-            </span>
+            <?php
+            // 服务/地址只在下面那张「TTS 服务与音色」卡片里显示一次，别重复
+            $ttsvProvider = class_exists('TtsVoice_Provider_OpenAI', false)
+                ? new TtsVoice_Provider_OpenAI()
+                : NULL;
+            $ttsvEndpoint = $ttsvProvider ? $ttsvProvider->endpoint() : '';
+            ?>
             <a class="ttsv-head-btn" href="<?php echo ttsv_esc($options->adminUrl . 'options-plugin.php?config=TtsVoice'); ?>"><?php _e('插件设置'); ?></a>
             <a class="ttsv-head-btn" href="<?php echo ttsv_esc($options->adminUrl . 'extending.php?panel=TtsVoice/panel.php&action=doctor'); ?>"><?php _e('运行环境自检'); ?></a>
         </div>
@@ -214,118 +208,76 @@ if ('doctor' === $panelAction) {
         <div class="row typecho-page-main" role="main">
             <div class="col-mb-12">
 
-                <!-- 音色样本（参考音频） -->
-                <?php $refInfo = TtsVoice_Plugin::refAudioInfo(); ?>
+                <!-- TTS 服务与音色（合并成一张紧凑卡片） -->
+                <?php
+                $refInfo = TtsVoice_Plugin::refAudioInfo();
+                $recvUrl = trim((string) TtsVoice_Plugin::refUploadUrl());
+                $hasRef  = !empty($refInfo['exists']);
+                $refBits = array();
+                $onHost  = ('' !== trim((string) TtsVoice_Plugin::opt('refAudioPath', '')));
+
+                if ($hasRef) {
+                    if ($refInfo['seconds'] > 0) {
+                        $refBits[] = number_format($refInfo['seconds'], 1) . ' 秒';
+                    }
+
+                    $refBits[] = ttsv_size($refInfo['size']);
+                }
+
+                if ($hasRef && $onHost) {
+                    $voiceLabel = '自定义样本（' . implode(' · ', $refBits) . '）';
+                } elseif ($hasRef) {
+                    $voiceLabel = '默认音色（本机有样本，未推到主机）';
+                } else {
+                    $voiceLabel = '默认音色';
+                }
+                ?>
                 <div class="typecho-list-operate clearfix">
-                    <h3 style="margin:0"><?php _e('音色样本'); ?></h3>
+                    <h3 style="margin:0"><?php _e('TTS 服务与音色'); ?></h3>
                 </div>
 
                 <div class="typecho-table-wrap">
-                    <div style="padding:14px 16px" id="ttsv-voice-box">
-
-                        <?php if (!empty($refInfo['exists'])) { ?>
-                            <p style="margin:0 0 10px">
-                                <b><?php _e('当前音色样本'); ?></b>
-                                <span style="color:#666;font-size:13px;margin-left:8px">
-                                    <?php
-                                    if ($refInfo['seconds'] > 0) {
-                                        echo number_format($refInfo['seconds'], 1) . ' ' . _t('秒') . ' · ';
-                                    }
-                                    echo ttsv_size($refInfo['size']) . ' · ' . ttsv_esc($refInfo['tag']);
-
-                                    // 多站点共用接收端时，这行是「我的样本存在哪」的唯一线索
-                                    if (!empty($refInfo['format']['ext'])) {
-                                        echo ' · ' . ttsv_esc(strtoupper($refInfo['format']['ext']));
-                                    }
-                                    ?>
-                                </span>
-                                <?php /*
-                                 * 试听做成按钮 + 点播时才 new Audio()：
-                                 * 不再往页面里放常驻 <audio controls> 元素，避免浏览器一进页面
-                                 * 就去碰媒体引擎 / 拉文件（Safari 对 preload="none" 也不一定守规矩）。
-                                 * 参考音频在 .voice 下，直链会被 nginx 拦掉，所以走带鉴权的 voice 接口。
-                                 */ ?>
-                                <button type="button" class="btn" id="ttsv-voice-play" style="margin-left:10px"><?php _e('▶ 试听样本'); ?></button>
-                            </p>
-                            <?php if (!empty($refInfo['source'])) { ?>
-                            <p style="margin:0 0 10px;font-size:12px;color:#888">
-                                <?php _e('来源标识'); ?>：<code><?php echo ttsv_esc($refInfo['source']); ?></code>
-                                <?php _e('（样本在 TTS 主机上存于「接收端目录 / 该标识 /」下，多站点互不覆盖）'); ?>
-                            </p>
-                            <?php } ?>
-                        <?php } else { ?>
-                            <p style="margin:0 0 10px">
-                                <?php _e('未上传音色样本 —— '); ?>
-                                <b><?php _e('不影响使用'); ?></b>
-                                <span style="font-size:13px;color:#888">
-                                    <?php _e('：提交时用 TTS 主机的默认音色。想用自己的声音，可在下面上传一段 10 秒以上的人声。'); ?>
-                                </span>
-                            </p>
-                        <?php } ?>
-
-                        <?php
-                        // 插件只有克隆一条路：模型恒为 1.7B-Base，音色只来自上面的样本。
-                        // 只有一条路：Qwen3-TTS 克隆
-                        if (true) {
-                            $ttsvCloneModel = TtsVoice_Plugin::cloneModelName();
-                            ?>
-                            <p style="margin:0 0 10px;font-size:13px;color:#555">
-                                <?php _e('本次合成走：'); ?>
-                                <?php if (TtsVoice_Plugin::hasCloneVoice()) { ?>
-                                    <b><?php _e('克隆模式'); ?></b> ·
-                                    <code><?php echo ttsv_esc($ttsvCloneModel); ?></code>
-                                    <?php _e('+ 上面的样本音色'); ?>
-                                <?php } else { ?>
-                                    <b class="ttsv-txt-danger"><?php _e('缺音色样本 —— 现在点「生成」会直接失败'); ?></b>
-                                    · <code><?php echo ttsv_esc($ttsvCloneModel); ?></code>
-                                <?php } ?>
-                            </p>
-                        <?php /* 上游模型驻留 / 冷加载状态：由 JS 请求 hoststatus 填充（接收端 v1.2.0+ 才有） */ ?>
-                            <p id="ttsv-host-status" style="margin:0 0 10px;font-size:13px;color:#999"></p>
-                        <?php } ?>
-
-                        <p style="margin:0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-                            <input type="file" id="ttsv-voice-file" accept="audio/*" />
-                            <button type="button" class="btn primary" id="ttsv-voice-upload"><?php _e('上传并处理'); ?></button>
-                            <?php if (!empty($refInfo['exists'])) { ?>
-                                <button type="button" class="btn" id="ttsv-voice-clear"><?php _e('删除样本'); ?></button>
-                                <?php if ('' !== trim((string) TtsVoice_Plugin::refUploadUrl())) { ?>
-                                    <button type="button" class="btn" id="ttsv-voice-sync"><?php _e('重新同步到 TTS 主机'); ?></button>
-                                <?php } ?>
-                            <?php } ?>
-                            <span id="ttsv-voice-msg" style="font-size:13px;color:#999"></span>
+                    <div class="ttsv-panel-card" id="ttsv-voice-box">
+                        <p class="ttsv-meta-line">
+                            <span class="ttsv-kv"><?php _e('服务'); ?></span>
+                            <code><?php echo ttsv_esc($ttsvProvider ? $ttsvProvider->label() : 'Qwen3-TTS'); ?></code>
+                            <span class="ttsv-kv"><?php _e('地址'); ?></span>
+                            <code><?php echo ttsv_esc($ttsvEndpoint); ?></code>
+                            <span class="ttsv-kv"><?php _e('音色'); ?></span>
+                            <b><?php echo ttsv_esc($voiceLabel); ?></b>
                         </p>
 
-                        <?php
-                        // 接收端地址要读**推导后**的值（refUploadUrl() 会从 openaiBaseUrl 推出来），
-                        // 不能读 opt('refUploadUrl') —— 那个键早已废弃，恒为空。
-                        $recvUrl = trim((string) TtsVoice_Plugin::refUploadUrl());
-                        $hostOk  = ('' !== $refInfo['forHost'] && is_file($refInfo['forHost']));
-                        ?>
+                        <p class="ttsv-btn-line">
+                            <button type="button" class="btn" id="ttsv-test"><?php _e('测试连接'); ?></button>
+                            <button type="button" class="btn" id="ttsv-voices"><?php _e('拉取音色'); ?></button>
+                            <input type="file" id="ttsv-voice-file" accept="audio/*" />
+                            <button type="button" class="btn primary" id="ttsv-voice-upload"><?php _e('上传样本'); ?></button>
+                            <?php if ($hasRef) { ?>
+                                <button type="button" class="btn" id="ttsv-voice-play"><?php _e('▶ 试听'); ?></button>
+                                <button type="button" class="btn" id="ttsv-voice-clear"><?php _e('删除'); ?></button>
+                                <?php if ('' !== $recvUrl) { ?>
+                                    <button type="button" class="btn" id="ttsv-voice-sync"><?php _e('重新同步'); ?></button>
+                                <?php } ?>
+                            <?php } ?>
+                        </p>
 
-                        <?php if ('' === $recvUrl && !$hostOk && !empty($refInfo['exists'])) { ?>
-                            <p class="ttsv-note is-error">
-                                <b><?php _e('网站和 TTS 不在同一台机器，但还没有配置接收端。'); ?></b><br>
-                                <?php _e('Qwen 服务端只认「TTS 主机上的本地文件路径」，站点上传的文件到不了那边。请在插件设置里填写「音色样本接收端」地址，并在 TTS 主机上运行接收端脚本。'); ?>
-                            </p>
-                        <?php } elseif ('' !== $recvUrl) { ?>
-                            <p style="margin:10px 0 0;font-size:13px;color:#666;line-height:1.7">
-                                <?php _e('接收端'); ?>：<code><?php echo ttsv_esc($recvUrl); ?></code>
-                                <?php _e('（上传时会自动推送到 TTS 主机）'); ?>
-                            </p>
-                        <?php } ?>
+                        <p class="ttsv-status-line">
+                            <span id="ttsv-health"><?php _e('连接未测试'); ?></span>
+                            <span id="ttsv-voice-msg"></span>
+                        </p>
+                        <p class="ttsv-status-line" id="ttsv-voice-list"></p>
+                        <p class="ttsv-status-line" id="ttsv-host-status"></p>
 
-                        <p class="description" style="margin:10px 0 0;line-height:1.7">
-                            <?php
+                        <p class="ttsv-hint"><?php
                             printf(
-                                _t('上传后会自动裁到 <b>%d 秒</b>并转成 24kHz 单声道 wav —— 参考音频不是越长越好，10~15 秒足够，太长反而拖慢每块合成的编码开销。'),
+                                _t('样本可选：不传就用主机默认音色；上传后自动裁到 %d 秒 / 24kHz 单声道。'),
                                 TtsVoice_Plugin::REF_AUDIO_SECONDS
                             );
-                            ?><br>
-                            <?php _e('建议用一段干净的独白：无背景音乐、无第二人说话、无明显混响，10 秒以上。'); ?><br>
-                            <b><?php _e('合成超时提示'); ?></b>：<?php _e('自建 TTS 约 4.5 字/秒，一次合成的时长受 Web 服务器超时限制。若日志里出现块合成被中断，请自行调大 nginx 的'); ?>
-                            <code>fastcgi_read_timeout</code><?php _e('（默认 60 秒），或把「分块长度」调小 —— 本插件不会去改你的服务器配置。'); ?>
-                        </p>
+                        ?></p>
+
+                        <?php if ('' === $recvUrl && $hasRef) { ?>
+                            <p class="ttsv-note is-error"><?php _e('未配置接收端：样本只在本机，TTS 主机读不到。'); ?></p>
+                        <?php } ?>
 
                         <?php
                         $staleCount = TtsVoice_Plugin::staleJobCount();
@@ -333,34 +285,10 @@ if ('doctor' === $panelAction) {
                         if ($staleCount > 0) {
                         ?>
                             <p id="ttsv-stale-note" class="ttsv-note is-warn">
-                                <?php
-                                printf(
-                                    _t('有 <b>%d</b> 篇音频是用<b>之前的音色</b>生成的，已标记为「音色已过期」。'),
-                                    $staleCount
-                                );
-                                ?>
-                                <?php _e('要重生成哪些由你决定：可以在下方列表里逐篇点「生成」，也可以'); ?>
+                                <?php printf(_t('有 <b>%d</b> 篇音频是用旧音色生成的。'), $staleCount); ?>
                                 <button type="button" class="btn" id="ttsv-regen-stale" style="padding:1px 8px;font-size:12px"><?php _e('全部重生成'); ?></button>
                             </p>
                         <?php } ?>
-
-                    </div>
-                </div>
-
-                <!-- 连通性 -->
-                <div class="typecho-list-operate clearfix">
-                    <h3 style="margin:0"><?php _e('TTS 服务连接'); ?></h3>
-                </div>
-
-                <div class="typecho-table-wrap">
-                    <div style="padding:14px 16px">
-                        <p style="margin:0;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-                            <button type="button" class="btn primary" id="ttsv-test"><?php _e('测试连接'); ?></button>
-                            <button type="button" class="btn" id="ttsv-voices"><?php _e('拉取音色列表'); ?></button>
-                            <button type="button" class="btn" id="ttsv-doctor"><?php _e('运行环境自检'); ?></button>
-                            <span id="ttsv-health" style="font-size:13px;color:#999"><?php _e('未测试'); ?></span>
-                        </p>
-                        <div id="ttsv-voice-list" style="margin-top:10px;font-size:13px;color:#666"></div>
                     </div>
                 </div>
 
@@ -727,18 +655,6 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
     var voiceBtn = document.getElementById('ttsv-voices');
     var voiceBox = document.getElementById('ttsv-voice-list');
 
-    /* 运行环境自检：用 button + JS 跳转（原来是 a 标签，与旁边两个按钮风格不一致） */
-    var doctorBtn = document.getElementById('ttsv-doctor');
-
-    if (doctorBtn) {
-        doctorBtn.addEventListener('click', function () {
-            window.location.href = <?php echo json_encode(
-                $options->adminUrl . 'extending.php?panel=TtsVoice/panel.php&action=doctor',
-                JSON_UNESCAPED_SLASHES | JSON_HEX_TAG | JSON_HEX_AMP
-            ); ?>;
-        });
-    }
-
     if (voiceBtn) {
         voiceBtn.addEventListener('click', function () {
             voiceBtn.disabled = true;
@@ -752,32 +668,25 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
                     return;
                 }
 
-                var voices = (res.data && res.data.voices) || {};
-                var names = [];
+                var voices = (res.data && res.data.voices) || [];
+                var names  = [];
 
-                // 兼容 {voices:[...]} 与 {voices:{...}} 两种返回
                 if (Array.isArray(voices)) {
                     names = voices;
-                } else if (voices.voices) {
-                    names = voices.voices;
                 } else {
                     for (var k in voices) {
                         if (Object.prototype.hasOwnProperty.call(voices, k)) {
-                            names.push(k);
+                            names.push(voices[k]);
                         }
                     }
                 }
 
-                // 自建 Qwen3-TTS 本来就没有「预置音色列表」：
-                // 有样本就用样本克隆，没样本就用主机内置的默认音色 —— 空列表不是错误。
-                voiceBox.textContent = names.length
-                    ? '可用音色（' + names.length + '）：' + names.join('、')
-                    : '无需选择音色：默认使用 TTS 主机内置音色';
-
-                // 同步型服务的音色由配置决定，服务端会附一段说明
-                if (res.data && res.data.note) {
-                    voiceBox.textContent += ' ｜ ' + res.data.note;
+                if (!names.length) {
+                    names = ['服务器默认音色（内置）'];
                 }
+
+                // 一行显示：服务器默认音色 + 我自己的样本
+                voiceBox.textContent = names.join(' · ');
             });
         });
     }
@@ -867,7 +776,7 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
     var voiceClear = document.getElementById('ttsv-voice-clear');
     if (voiceClear) {
         voiceClear.addEventListener('click', function () {
-            if (!window.confirm('确定删除当前音色样本？\n删除后就无法生成音频了 —— 需要重新上传样本才能再生成。')) {
+            if (!window.confirm('确定删除当前音色样本？\n删除后提交会改用 TTS 主机的默认音色。')) {
                 return;
             }
 
