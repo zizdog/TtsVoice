@@ -23,7 +23,7 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.10
+ * @version 1.8.0
  */
 class TtsVoice_Action extends Typecho_Widget
 {

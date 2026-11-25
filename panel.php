@@ -13,7 +13,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.7.10
+ * @version 1.8.0
  */
 
 if (!defined('__TYPECHO_ADMIN__')) {
@@ -194,13 +194,6 @@ if ('doctor' === $panelAction) {
         </div>
 
         <div class="ttsv-head">
-            <?php
-            // 服务/地址只在下面那张「TTS 服务与音色」卡片里显示一次，别重复
-            $ttsvProvider = class_exists('TtsVoice_Provider_OpenAI', false)
-                ? new TtsVoice_Provider_OpenAI()
-                : NULL;
-            $ttsvEndpoint = $ttsvProvider ? $ttsvProvider->endpoint() : '';
-            ?>
             <a class="ttsv-head-btn" href="<?php echo ttsv_esc($options->adminUrl . 'options-plugin.php?config=TtsVoice'); ?>"><?php _e('插件设置'); ?></a>
             <a class="ttsv-head-btn" href="<?php echo ttsv_esc($options->adminUrl . 'extending.php?panel=TtsVoice/panel.php&action=doctor'); ?>"><?php _e('运行环境自检'); ?></a>
         </div>
@@ -208,89 +201,17 @@ if ('doctor' === $panelAction) {
         <div class="row typecho-page-main" role="main">
             <div class="col-mb-12">
 
-                <!-- TTS 服务与音色（合并成一张紧凑卡片） -->
                 <?php
-                $refInfo = TtsVoice_Plugin::refAudioInfo();
-                $recvUrl = trim((string) TtsVoice_Plugin::refUploadUrl());
-                $hasRef  = !empty($refInfo['exists']);
-                $refBits = array();
-                $onHost  = ('' !== trim((string) TtsVoice_Plugin::opt('refAudioPath', '')));
+                // 设置页已经负责音色/连接；这里只保留「旧音色任务」这一个动作提示
+                $staleCount = TtsVoice_Plugin::staleJobCount();
 
-                if ($hasRef) {
-                    if ($refInfo['seconds'] > 0) {
-                        $refBits[] = number_format($refInfo['seconds'], 1) . ' 秒';
-                    }
-
-                    $refBits[] = ttsv_size($refInfo['size']);
-                }
-
-                if ($hasRef && $onHost) {
-                    $voiceLabel = '自定义样本（' . implode(' · ', $refBits) . '）';
-                } elseif ($hasRef) {
-                    $voiceLabel = '默认音色（本机有样本，未推到主机）';
-                } else {
-                    $voiceLabel = '默认音色';
-                }
+                if ($staleCount > 0) {
                 ?>
-                <div class="typecho-list-operate clearfix">
-                    <h3 style="margin:0"><?php _e('TTS 服务与音色'); ?></h3>
-                </div>
-
-                <div class="typecho-table-wrap">
-                    <div class="ttsv-panel-card" id="ttsv-voice-box">
-                        <p class="ttsv-meta-line">
-                            <span class="ttsv-kv"><?php _e('服务'); ?></span>
-                            <code><?php echo ttsv_esc($ttsvProvider ? $ttsvProvider->label() : 'Qwen3-TTS'); ?></code>
-                            <span class="ttsv-kv"><?php _e('地址'); ?></span>
-                            <code><?php echo ttsv_esc($ttsvEndpoint); ?></code>
-                            <span class="ttsv-kv"><?php _e('音色'); ?></span>
-                            <b><?php echo ttsv_esc($voiceLabel); ?></b>
-                        </p>
-
-                        <p class="ttsv-btn-line">
-                            <button type="button" class="btn" id="ttsv-test"><?php _e('测试连接'); ?></button>
-                            <button type="button" class="btn" id="ttsv-voices"><?php _e('拉取音色'); ?></button>
-                            <input type="file" id="ttsv-voice-file" accept="audio/*" />
-                            <button type="button" class="btn primary" id="ttsv-voice-upload"><?php _e('上传样本'); ?></button>
-                            <?php if ($hasRef) { ?>
-                                <button type="button" class="btn" id="ttsv-voice-play"><?php _e('▶ 试听'); ?></button>
-                                <button type="button" class="btn" id="ttsv-voice-clear" title="<?php _e('只删除网站本机的样本；不影响 TTS 主机的默认音色，也不影响其他站点'); ?>"><?php _e('删除'); ?></button>
-                                <?php if ('' !== $recvUrl) { ?>
-                                    <button type="button" class="btn" id="ttsv-voice-sync"><?php _e('重新同步'); ?></button>
-                                <?php } ?>
-                            <?php } ?>
-                        </p>
-
-                        <p class="ttsv-status-line">
-                            <span id="ttsv-health"><?php _e('连接未测试'); ?></span>
-                            <span id="ttsv-voice-msg"></span>
-                        </p>
-                        <p class="ttsv-status-line" id="ttsv-voice-list"></p>
-                        <p class="ttsv-status-line" id="ttsv-host-status"></p>
-
-                        <p class="ttsv-hint"><?php
-                            printf(
-                                _t('样本可选：不传就用主机默认音色；上传后自动裁到 %d 秒 / 24kHz 单声道。'),
-                                TtsVoice_Plugin::REF_AUDIO_SECONDS
-                            );
-                        ?></p>
-
-                        <?php if ('' === $recvUrl && $hasRef) { ?>
-                            <p class="ttsv-note is-error"><?php _e('未配置接收端：样本只在本机，TTS 主机读不到。'); ?></p>
-                        <?php } ?>
-
-                        <?php
-                        $staleCount = TtsVoice_Plugin::staleJobCount();
-
-                        if ($staleCount > 0) {
-                        ?>
-                            <p id="ttsv-stale-note" class="ttsv-note is-warn">
-                                <?php printf(_t('有 <b>%d</b> 篇音频是用旧音色生成的。'), $staleCount); ?>
-                                <button type="button" class="btn" id="ttsv-regen-stale" style="padding:1px 8px;font-size:12px"><?php _e('全部重生成'); ?></button>
-                            </p>
-                        <?php } ?>
-                    </div>
-                </div>
+                    <p id="ttsv-stale-note" class="ttsv-note is-warn" style="margin:0 0 14px">
+                        <?php printf(_t('有 <b>%d</b> 篇音频是用旧音色生成的。'), $staleCount); ?>
+                        <button type="button" class="btn" id="ttsv-regen-stale" style="padding:1px 8px;font-size:12px"><?php _e('全部重生成'); ?></button>
+                    </p>
+                <?php } ?>
 
                 <!-- 统计 -->
                 <div class="typecho-list-operate clearfix">
@@ -563,255 +484,6 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
         });
     }
 
-    /* 测试连接 */
-    var testBtn = document.getElementById('ttsv-test');
-    var healthEl = document.getElementById('ttsv-health');
-
-    if (testBtn) {
-        testBtn.addEventListener('click', function () {
-            testBtn.disabled = true;
-            healthEl.textContent = '测试中…';
-            healthEl.style.color = '';
-
-            request('GET', 'health', { _: Date.now() }, function (res) {
-                testBtn.disabled = false;
-
-                if (0 !== res.code) {
-                    healthEl.textContent = res.msg || '连接失败';
-                    healthEl.style.color = '#c0392b';
-                    return;
-                }
-
-                healthEl.textContent = '连接正常（' + (res.data.ms || 0) + ' ms，队列 ' + ((res.data.nas && res.data.nas.jobs) || 0) + ' 个任务）';
-                healthEl.style.color = '#46a05a';
-
-                // 顺手刷新「上游模型驻留 / 冷加载」状态
-                loadHostStatus();
-            });
-        });
-    }
-
-    /*
-     * 上游模型驻留 / 冷加载状态
-     *
-     * 接收端 v1.2.0+ 新增的只读 GET /voice/status：回报上游当前驻留内存的模型与
-     * cold_load_seconds。模型没驻留时（Qwen 刚重启、面板还在补载）提示
-     * 「正在加载约 25 秒」，免得用户把「这次慢」当成「坏了」。
-     *
-     * 【故意不自动调用】只在点「测试连接」时查一次。
-     * 因为 /voice/status 要由接收端去问上游，而上游合成是串行的 ——
-     * 正在合成时查它会排队，等于在面板每次打开时白占一个 PHP worker 和几秒等待。
-     * 旧接收端 / 不可达时它返回 ok=false，这里静默不显示，不影响任何功能。
-     */
-    var hostEl = document.getElementById('ttsv-host-status');
-
-    function escHtml(s) {
-        return String(s).replace(/[&<>"']/g, function (c) {
-            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-        });
-    }
-
-    function shortModel(m) {
-        var parts = String(m).split('/');
-        return parts[parts.length - 1];
-    }
-
-    function loadHostStatus() {
-        if (!hostEl) {
-            return;
-        }
-
-        request('GET', 'hoststatus', { _: Date.now() }, function (res) {
-            if (!res || 0 !== res.code) {
-                hostEl.textContent = '';
-                return;
-            }
-
-            var d = res.data || {};
-
-            if (!d.ok) {
-                hostEl.textContent = '';
-                return;
-            }
-
-            if (d.cold) {
-                hostEl.innerHTML = '⚠ TTS 模型 <code>' + escHtml(shortModel(d.needed)) + '</code> 当前未驻留内存'
-                    + ' —— 可能正在冷加载（约 ' + (parseInt(d.seconds, 10) || 25) + ' 秒后自动可用）；'
-                    + '若长时间如此，请检查模型名与上游日志。';
-                hostEl.style.color = '#c0392b';
-            } else {
-                var extra = (d.models && d.models.length)
-                    ? '（上游已驻留 ' + d.models.length + ' 个模型）'
-                    : '';
-
-                hostEl.innerHTML = 'TTS 主机就绪：<code>' + escHtml(shortModel(d.needed)) + '</code> 已在内存中'
-                    + escHtml(extra) + '。';
-                hostEl.style.color = '#46a05a';
-            }
-        });
-    }
-
-    /* 拉取音色 */
-    var voiceBtn = document.getElementById('ttsv-voices');
-    var voiceBox = document.getElementById('ttsv-voice-list');
-
-    if (voiceBtn) {
-        voiceBtn.addEventListener('click', function () {
-            voiceBtn.disabled = true;
-            voiceBox.textContent = '拉取中…';
-
-            request('GET', 'voices', { _: Date.now() }, function (res) {
-                voiceBtn.disabled = false;
-
-                if (0 !== res.code) {
-                    voiceBox.textContent = res.msg || '拉取失败';
-                    return;
-                }
-
-                var voices = (res.data && res.data.voices) || [];
-                var names  = [];
-
-                if (Array.isArray(voices)) {
-                    names = voices.map(function (v) {
-                        return (v && v.name) ? v.name : String(v);
-                    });
-                }
-
-                if (!names.length) {
-                    names = ['服务器默认音色'];
-                }
-
-                // 一行显示：内置 / 我的音色 / 我上传的（只显示 name）
-                voiceBox.textContent = names.join(' · ');
-            });
-        });
-    }
-
-    /* ==================== 音色样本（参考音频） ==================== */
-
-    function voiceMsg(text, isError) {
-        var box = document.getElementById('ttsv-voice-msg');
-
-        if (box) {
-            box.textContent = text || '';
-            box.style.color = isError ? '#c0392b' : '#3a7ca5';
-        }
-    }
-
-    var voiceUpload = document.getElementById('ttsv-voice-upload');
-    var voiceFile   = document.getElementById('ttsv-voice-file');
-
-    // 试听：参考音频在 .voice 目录下（直链会被 nginx 拦），走带鉴权的接口。
-    // 点播时才 new Audio()，页面里不放常驻 <audio> 元素，也不预拉文件。
-    var voicePlay = document.getElementById('ttsv-voice-play');
-
-    if (voicePlay) {
-        voicePlay.addEventListener('click', function () {
-            try {
-                // 注意要带 ? —— ACTION 是 .../ttsvoice/，接口名是路径段，参数要跟在 ? 后面
-                new Audio(ACTION + 'voice?_token=' + encodeURIComponent(TOKEN)).play();
-            } catch (e) {
-                toast('试听失败：' + (e && e.message ? e.message : '浏览器不支持音频播放'), true);
-            }
-        });
-    }
-
-    if (voiceUpload && voiceFile) {
-        // 上传走 multipart，不能复用上面的 request()（那只发 urlencoded）
-        voiceUpload.addEventListener('click', function () {
-            if (!voiceFile.files || !voiceFile.files.length) {
-                voiceMsg('请先选择音频文件', true);
-                return;
-            }
-
-            var fd = new FormData();
-
-            fd.append('voice', voiceFile.files[0]);
-            fd.append('_token', TOKEN);
-
-            voiceUpload.disabled = true;
-            voiceMsg('上传并处理中…');
-
-            var xhr = new XMLHttpRequest();
-
-            xhr.open('POST', ACTION + 'uploadvoice', true);
-            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-
-            xhr.onreadystatechange = function () {
-                if (4 !== xhr.readyState) {
-                    return;
-                }
-
-                voiceUpload.disabled = false;
-
-                var res = null;
-
-                try {
-                    res = JSON.parse(xhr.responseText);
-                } catch (e) {
-                    res = { code: 500, msg: '服务器返回异常' };
-                }
-
-                if (res && 0 === res.code) {
-                    toast(res.msg || '音色样本已更新', false);
-
-                    // 重新加载：样本信息、路径、每行的「音色已过期」标记都要重算
-                    window.setTimeout(function () {
-                        window.location.reload();
-                    }, 700);
-                } else {
-                    voiceMsg((res && res.msg) ? res.msg : '上传失败', true);
-                    toast((res && res.msg) ? res.msg : '上传失败', true);
-                }
-            };
-
-            xhr.send(fd);
-        });
-    }
-
-    var voiceClear = document.getElementById('ttsv-voice-clear');
-    if (voiceClear) {
-        voiceClear.addEventListener('click', function () {
-            if (!window.confirm('确定删除本站的音色样本？\n\n只删「网站本机」的样本文件（并清空已推送路径）。\nTTS 主机的默认音色、以及其他站点的样本都不会被动到。')) {
-                return;
-            }
-
-            request('POST', 'clearvoice', {}, function (res) {
-                if (res && 0 === res.code) {
-                    toast(res.msg || '已删除', false);
-                    window.setTimeout(function () {
-                        window.location.reload();
-                    }, 700);
-                } else {
-                    voiceMsg((res && res.msg) ? res.msg : '删除失败', true);
-                }
-            });
-        });
-    }
-
-    /* 重新同步到 TTS 主机 */
-    var voiceSync = document.getElementById('ttsv-voice-sync');
-
-    if (voiceSync) {
-        voiceSync.addEventListener('click', function () {
-            voiceSync.disabled = true;
-            voiceMsg('正在推送到 TTS 主机…');
-
-            request('POST', 'syncvoice', {}, function (res) {
-                voiceSync.disabled = false;
-
-                if (res && 0 === res.code) {
-                    voiceMsg(res.msg || '已同步');
-                    toast(res.msg || '已同步到 TTS 主机', false);
-                } else {
-                    var msg = (res && res.msg) ? res.msg : '同步失败';
-                    voiceMsg(msg, true);
-                    toast(msg, true);
-                }
-            });
-        });
-    }
-
     /*
      * 全部重生成过期音频
      *
@@ -858,11 +530,8 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
                 regenBtn.disabled = false;
 
                 if (failed.length) {
-                    voiceMsg('已提交 ' + okCount + ' 篇，失败 ' + failed.length + ' 篇'
-                        + '（' + failed.slice(0, 3).join('、') + (failed.length > 3 ? '…' : '') + '）');
-                    toast('有 ' + failed.length + ' 篇提交失败：' + failed[0], true);
+                    toast('已提交 ' + okCount + ' 篇，失败 ' + failed.length + ' 篇：' + failed[0], true);
                 } else {
-                    voiceMsg('已全部提交（' + okCount + ' 篇），进度会自动刷新');
                     toast('已提交 ' + okCount + ' 篇重生成', false);
                 }
 
@@ -901,7 +570,6 @@ window.__TTS_PANEL__ = <?php echo json_encode(array('action' => $action, 'token'
                     delete pollSeen[cid];
                     delete noticeSeen[cid];
 
-                    voiceMsg('已提交 ' + index + '/' + cids.length);
                     next();
                 });
             }
