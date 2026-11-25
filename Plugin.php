@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.8.0
+ * @version 1.8.1
  * @link    https://zizdog.com
  */
 
@@ -17,6 +17,7 @@ namespace {
 
     require_once __DIR__ . '/compat.php';
     require_once __DIR__ . '/Action.php';
+    require_once __DIR__ . '/Updater.php';
 
     // 防止重复包含时重复声明类
     if (class_exists('TtsVoice_Plugin_Base', false)) {
@@ -26,7 +27,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.8.0';
+        const VERSION = '1.8.1';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -345,6 +346,19 @@ namespace {
 
         public static function config($form)
         {
+            /*
+             * 在线更新提示条（在 <form> 之外，所以不会被当表单内容提交）
+             *
+             * 只在「插件设置页」渲染：激活插件时核心也会调 config()，那里不该触发网络检查。
+             */
+            if (isset($_GET['config']) && 'TtsVoice' === (string) $_GET['config']) {
+                try {
+                    echo self::updater()->notice();
+                } catch (Throwable $e) {
+                    // 取不到清单时不影响设置页
+                }
+            }
+
             // 【自愈】清掉库里残留、但已不在白名单的配置键（老站点升级上来时救命）。
             // 核心渲染设置页会对库里每个键做 $form->getInput($key)->value($val)，
             // 而 getInput() 没有 isset 保护 —— 键不存在就 fatal（整页 500）。
@@ -972,6 +986,35 @@ namespace {
         const CSRF_SUFFIX = 'ttsvoice:admin-token';
 
         /**
+         * 在线更新器
+         *
+         * 协议见 .ai-notes/handoff/UPDATE-STANDARD.md；实现是插件目录下的 Updater.php
+         * （命名空间已改成 TtsVoice，避免和其它插件各自 require 时撞类名）。
+         *
+         * @return \TtsVoice\Updater
+         */
+        public static function updater()
+        {
+            if (NULL === self::$updaterInstance) {
+                $cacheDir = (defined('__TYPECHO_ROOT_DIR__') ? __TYPECHO_ROOT_DIR__ : sys_get_temp_dir())
+                    . '/usr/cache/updater';
+
+                self::$updaterInstance = new \TtsVoice\Updater(array(
+                    'kind'          => 'plugin',
+                    'slug'          => 'ttsvoice',
+                    'version'       => self::VERSION,
+                    'root'          => __DIR__,
+                    'version_file'  => 'Plugin.php',
+                    'cache_dir'     => $cacheDir,
+                    'title'         => 'TtsVoice',
+                    'action_prefix' => 'ttsvoice',
+                ));
+            }
+
+            return self::$updaterInstance;
+        }
+
+        /**
          * 生成 CSRF token（后台页面渲染时注入给前端）
          *
          * @return string
@@ -1019,6 +1062,13 @@ namespace {
          * （典型症状：上传音色样本后，本请求里读到的 refAudioPath 仍是旧的。）
          */
         protected static $optCache = NULL;
+
+        /**
+         * 在线更新器（每请求一个实例）
+         *
+         * @var \TtsVoice\Updater|null
+         */
+        protected static $updaterInstance = NULL;
 
         public static function opt($key, $default = '')
         {
@@ -4112,5 +4162,17 @@ namespace {
         TtsVoice_Plugin_Base::writeDefaultConfig();
     } catch (Throwable $e) {
         // 静默失败，不能因为自愈逻辑影响页面
+    }
+
+    /*
+     * 在线更新动作（?ttsvoice-update=1 / ?ttsvoice-check=1）
+     *
+     * 必须在这里（页面输出之前）处理：它会校验 CSRF + 管理员权限，然后 302 回设置页。
+     * 没有这两个参数时只做两次 isset，开销可忽略。
+     */
+    try {
+        TtsVoice_Plugin_Base::updater()->handleAction();
+    } catch (Throwable $e) {
+        // 更新器异常不能影响前台
     }
 }
