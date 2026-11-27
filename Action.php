@@ -23,16 +23,17 @@ require_once dirname(__FILE__) . '/Providers.php';
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.8.1
+ * @version 1.8.2
  */
 class TtsVoice_Action extends Typecho_Widget
 {
     /**
-     * 任务允许停留在 queued/running/done 的最长时间（秒）
+     * 连续多久「完全拿不到任务状态」才判失败（秒）
      *
-     * 超过就判失败：正常情况下 65 分钟音频约 40 分钟跑完，6 小时足够覆盖长文 + 主机排队。
+     * 注意这是**每个任务自己**的静默时长，不是排队时长：
+     * 一次性批量生成很多篇时，后面的任务在主机队列里等一两天都正常，不能按创建时间算超时。
      */
-    const MAX_JOB_AGE = 21600;
+    const MAX_SILENT_AGE = 43200;
     /**
      * Widget 初始化
      *
@@ -691,24 +692,6 @@ class TtsVoice_Action extends Typecho_Widget
 
         $provider = $this->provider();
 
-        /*
-         * 【超时兜底】远端任务如果一直查不到结果（反代 502、接收端异常、任务被清），
-         * 以前本地会永远停在 queued/running，前端无限轮询、用户也没法重新生成。
-         * 规则：中间态 + 超过 MAX_JOB_AGE 没有任何更新 → 判失败，让用户重生成。
-         */
-        $status = (string) $job['status'];
-        $age    = time() - intval($job['updated']);
-
-        if (in_array($status, array('queued', 'running', 'done'), true) && $age > self::MAX_JOB_AGE) {
-            TtsVoice_Plugin::saveJob($cid, array(
-                'status' => 'failed',
-                'error'  => '任务超时：超过 ' . round(self::MAX_JOB_AGE / 3600, 1) . ' 小时没有进展，'
-                            . '请检查 TTS 主机后重新生成',
-            ));
-
-            return TtsVoice_Plugin::job($cid);
-        }
-
         try {
             $patch = $provider->poll($job);
         } catch (Throwable $e) {
@@ -717,6 +700,25 @@ class TtsVoice_Action extends Typecho_Widget
         }
 
         if (!is_array($patch) || empty($patch)) {
+            /*
+             * 【超时兜底，只针对单个任务】
+             *
+             * 只有在「这一次也完全拿不到状态」时才算静默：
+             *   · queued 永不按时间判失败 —— 批量生成时排在后面等一两天是正常的；
+             *   · running / done 连续 12 小时都拿不到状态（反代挂了 / 接收端失联）才判失败。
+             * 以前是在 poll 之前按 updated 一刀切，浏览器关掉一段时间再打开，
+             * 队列里排着的任务会被全部误判成超时。
+             */
+            if (TtsVoice_Plugin::jobSilentTooLong($job, self::MAX_SILENT_AGE)) {
+                TtsVoice_Plugin::saveJob($cid, array(
+                    'status' => 'failed',
+                    'error'  => '连续 ' . round(self::MAX_SILENT_AGE / 3600, 1) . ' 小时无法从 TTS 主机获取任务状态，'
+                                . '请检查主机后重新生成（任务可能仍在主机队列里）',
+                ));
+
+                return TtsVoice_Plugin::job($cid);
+            }
+
             return $job;
         }
 

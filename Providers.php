@@ -35,7 +35,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.8.1
+ * @version 1.8.2
  */
 
 require_once dirname(__FILE__) . '/compat.php';

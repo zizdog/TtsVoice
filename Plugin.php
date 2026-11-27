@@ -5,7 +5,7 @@
  *
  * @package TtsVoice
  * @author  zizdog
- * @version 1.8.1
+ * @version 1.8.2
  * @link    https://zizdog.com
  */
 
@@ -27,7 +27,7 @@ namespace {
     class TtsVoice_Plugin_Base implements Typecho_Plugin_Interface
     {
         /** 插件版本 */
-        const VERSION = '1.8.1';
+        const VERSION = '1.8.2';
 
         /** Action 路由名 */
         const ROUTE = 'ttsvoice';
@@ -3067,6 +3067,39 @@ namespace {
 
             return $result;
         }
+
+        /**
+         * 这个任务是否「长时间完全拿不到状态」（只对 running / done）
+         *
+         * 【为什么排除 queued】批量生成时，排在主机队列后面的任务等一两天都正常；
+         * 排队时长不是故障。只有已经开始跑（running）或正在下载（done）却长期
+         * 拿不到任何状态，才说明接收端/反代出了问题。
+         *
+         * @param array $job
+         * @param int   $seconds 静默阈值
+         * @return bool
+         */
+        public static function jobSilentTooLong($job, $seconds = 43200)
+        {
+            if (!is_array($job)) {
+                return false;
+            }
+
+            $status = (string) (isset($job['status']) ? $job['status'] : '');
+
+            if (!in_array($status, array('running', 'done'), true)) {
+                return false;
+            }
+
+            $updated = intval(isset($job['updated']) ? $job['updated'] : 0);
+
+            if ($updated <= 0) {
+                return false;
+            }
+
+            return (time() - $updated) > max(60, intval($seconds));
+        }
+
 
         /**
          * 判断某条任务是不是「音色已过期」
